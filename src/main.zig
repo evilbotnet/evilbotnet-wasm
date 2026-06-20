@@ -11,48 +11,56 @@ const H: usize = 600;
 var framebuffer: [W * H]u32 = undefined;
 
 // ---------------- tunables ----------------
-const MAX_BOTS: usize = 400;
-const START_BOTS: usize = 50;
+const MAX_BOTS: usize = 1500;
+const START_BOTS: usize = 110;
 
 const NODE_COUNT: usize = 8;
-const NODE_INF_R: f32 = 30; // infection radius around a node
+const NODE_INF_R: f32 = 32; // infection radius around a node
 const NODE_DRAW_R: f32 = 13;
 
 const MAX_SENT: usize = 8;
 const START_SENT: usize = 2;
-const SENT_SPEED: f32 = 97; // a hair faster than bots: you can't just outrun them
+const SENT_SPEED: f32 = 92; // slightly slower than bots: you can kite them
 const SENT_KILL_R: f32 = 18;
-const SENT_SCARE_R: f32 = 40; // bots react to sentinels later -> more deaths
-const SENT_KILL_CD: f32 = 0.06; // seconds between kill-bursts per sentinel
+const SENT_SCARE_R: f32 = 48;
+const SENT_KILL_CD: f32 = 0.07; // seconds between kill-bursts per sentinel
 const SENT_KILL_N: usize = 3; // bots deleted per burst in range
 
 const BOT_SPEED: f32 = 96;
 const BOT_FORCE: f32 = 520;
-const SEP_R: f32 = 11;
+const SEP_R: f32 = 10;
 const VIEW_R: f32 = 30;
 const W_SEP: f32 = 1.7;
 const W_ALIGN: f32 = 0.85;
 const W_COH: f32 = 0.8;
 const W_SEEK: f32 = 1.1;
-const W_FLEE: f32 = 1.15;
+const W_FLEE: f32 = 1.5;
 
-const INF_CAP: f32 = 18; // bots beyond this don't speed infection further
-const INF_GAIN: f32 = 0.95; // per second at full cap
+// spatial hash grid (cell == VIEW_R) so flocking neighbor lookups are ~O(n)
+const GCELL: f32 = 30.0;
+const GW: usize = 12; // ceil(W / GCELL)
+const GH: usize = 20; // ceil(H / GCELL)
+const NCELLS: usize = GW * GH;
+const GWi: i32 = @intCast(GW);
+const GHi: i32 = @intCast(GH);
+
+const INF_CAP: f32 = 26; // bots beyond this don't speed infection further
+const INF_GAIN: f32 = 1.15; // per second at full cap
 const INF_DECAY: f32 = 0.02; // slow self-heal when no bots present
-const INF_DISINFECT: f32 = 0.14; // sentinel scrubbing rate
-const OWN_LOSE_AT: f32 = 0.6; // hysteresis: lose a captured node only below this
+const INF_DISINFECT: f32 = 0.13; // sentinel scrubbing rate
+const OWN_LOSE_AT: f32 = 0.55; // hysteresis: lose a captured node only below this
 
-const OWN_BONUS_BOTS: usize = 18;
-const OWN_SPAWN_DT: f32 = 3.4;
-const OWN_SPAWN_N: usize = 3;
+const OWN_BONUS_BOTS: usize = 45;
+const OWN_SPAWN_DT: f32 = 2.6;
+const OWN_SPAWN_N: usize = 5;
 
-const SURGE_DUR: f32 = 1.0;
-const SURGE_CD: f32 = 4.5;
+const SURGE_DUR: f32 = 1.2;
+const SURGE_CD: f32 = 4.0;
 
-const COLLAPSE_N: usize = 6; // held below this many bots...
+const COLLAPSE_N: usize = 8; // held below this many bots...
 const COLLAPSE_T: f32 = 4.0; // ...for this long = botnet dismantled (loss)
 
-const MAX_PART: usize = 400;
+const MAX_PART: usize = 700;
 const MAX_LINKS: usize = 24;
 
 // ---------------- RNG ----------------
@@ -109,6 +117,11 @@ inline fn dist2(ax: f32, ay: f32, bx: f32, by: f32) f32 {
 }
 inline fn absI(v: i32) i32 {
     return if (v < 0) -v else v;
+}
+inline fn clampI(v: i32, lo: i32, hi: i32) i32 {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
 }
 
 // ---------------- draw primitives ----------------
@@ -205,6 +218,10 @@ var bot_y: [MAX_BOTS]f32 = undefined;
 var bot_vx: [MAX_BOTS]f32 = undefined;
 var bot_vy: [MAX_BOTS]f32 = undefined;
 var bot_count: usize = 0;
+
+// spatial hash: per-cell singly-linked list of bot indices, rebuilt each frame
+var cell_head: [NCELLS]i32 = undefined;
+var bot_next: [MAX_BOTS]i32 = undefined;
 
 var node_x: [NODE_COUNT]f32 = undefined;
 var node_y: [NODE_COUNT]f32 = undefined;
@@ -449,6 +466,18 @@ fn stepBots(dt: f32) void {
     const view2 = VIEW_R * VIEW_R;
     const sep2 = SEP_R * SEP_R;
 
+    // rebuild spatial hash from current positions
+    var c: usize = 0;
+    while (c < NCELLS) : (c += 1) cell_head[c] = -1;
+    var bi: usize = 0;
+    while (bi < bot_count) : (bi += 1) {
+        const gx = clampI(@intFromFloat(bot_x[bi] / GCELL), 0, GWi - 1);
+        const gy = clampI(@intFromFloat(bot_y[bi] / GCELL), 0, GHi - 1);
+        const cc: usize = @intCast(gy * GWi + gx);
+        bot_next[bi] = cell_head[cc];
+        cell_head[cc] = @intCast(bi);
+    }
+
     var i: usize = 0;
     while (i < bot_count) : (i += 1) {
         var sepx: f32 = 0;
@@ -459,23 +488,38 @@ fn stepBots(dt: f32) void {
         var cohy: f32 = 0;
         var n: f32 = 0;
 
-        var j: usize = 0;
-        while (j < bot_count) : (j += 1) {
-            if (j == i) continue;
-            const dx = bot_x[i] - bot_x[j];
-            const dy = bot_y[i] - bot_y[j];
-            const d2 = dx * dx + dy * dy;
-            if (d2 > view2) continue;
-            if (d2 < sep2 and d2 > 0.0001) {
-                const inv = 1.0 / d2;
-                sepx += dx * inv;
-                sepy += dy * inv;
+        // only scan the 3x3 block of cells around this bot
+        const cx0 = clampI(@intFromFloat(bot_x[i] / GCELL), 0, GWi - 1);
+        const cy0 = clampI(@intFromFloat(bot_y[i] / GCELL), 0, GHi - 1);
+        var gy = cy0 - 1;
+        while (gy <= cy0 + 1) : (gy += 1) {
+            if (gy < 0 or gy >= GHi) continue;
+            var gx = cx0 - 1;
+            while (gx <= cx0 + 1) : (gx += 1) {
+                if (gx < 0 or gx >= GWi) continue;
+                var j = cell_head[@intCast(gy * GWi + gx)];
+                while (j >= 0) {
+                    const ju: usize = @intCast(j);
+                    if (ju != i) {
+                        const dx = bot_x[i] - bot_x[ju];
+                        const dy = bot_y[i] - bot_y[ju];
+                        const d2 = dx * dx + dy * dy;
+                        if (d2 <= view2) {
+                            if (d2 < sep2 and d2 > 0.0001) {
+                                const inv = 1.0 / d2;
+                                sepx += dx * inv;
+                                sepy += dy * inv;
+                            }
+                            alx += bot_vx[ju];
+                            aly += bot_vy[ju];
+                            cohx += bot_x[ju];
+                            cohy += bot_y[ju];
+                            n += 1;
+                        }
+                    }
+                    j = bot_next[ju];
+                }
             }
-            alx += bot_vx[j];
-            aly += bot_vy[j];
-            cohx += bot_x[j];
-            cohy += bot_y[j];
-            n += 1;
         }
 
         var ax: f32 = 0;
