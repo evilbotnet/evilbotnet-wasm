@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<meta name="theme-color" content="#060a09" />
+<title>EVILBOTNET</title>
+<style>
+  :root { --grn:#3cff82; --red:#ff3c46; --amber:#ffbe46; }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; background: #040605; color: var(--grn);
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    overscroll-behavior: none; -webkit-user-select: none; user-select: none; touch-action: none;
+  }
+  body { display: flex; align-items: center; justify-content: center; }
+  #stage {
+    position: relative; aspect-ratio: 360 / 600;
+    height: min(100svh, calc(100vw * 600 / 360)); max-height: 100svh;
+    border-radius: 10px; overflow: hidden;
+    box-shadow: 0 0 50px rgba(60,255,130,.16), 0 10px 40px rgba(0,0,0,.6);
+  }
+  canvas { display: block; width: 100%; height: 100%; image-rendering: pixelated; background: #060a09; }
+
+  #hud { position:absolute; inset:0; pointer-events:none; }
+  #top {
+    position:absolute; top:0; left:0; right:0; height:72px;
+    display:flex; align-items:center; justify-content:space-between;
+    padding:8px 12px; gap:8px; font-size: clamp(11px,3vmin,15px);
+    background: linear-gradient(#060a09ee, #060a0900);
+    text-shadow: 0 0 6px rgba(60,255,130,.4);
+  }
+  .stat b { display:block; font-size: clamp(15px,4.6vmin,22px); font-weight:800; line-height:1; }
+  .stat span { opacity:.6; font-size: 10px; letter-spacing:1px; }
+  #s-take b { color: var(--grn); }
+  #s-bots b { color: #eafff1; }
+  #s-nodes b { color: var(--amber); }
+  #bar { position:absolute; top:72px; left:0; height:3px; background: var(--grn);
+         width:0%; box-shadow: 0 0 8px var(--grn); transition: width .15s linear; }
+
+  #surge {
+    position:absolute; bottom:14px; left:50%; transform:translateX(-50%);
+    pointer-events:auto; width:160px; height:46px; border-radius:24px;
+    display:flex; align-items:center; justify-content:center; overflow:hidden;
+    border:1px solid rgba(60,255,130,.5); color:#eafff1; font-weight:800; letter-spacing:2px;
+    background: rgba(8,16,12,.6); font-size:15px; backdrop-filter: blur(2px);
+  }
+  #surge .fill { position:absolute; left:0; top:0; bottom:0; width:0%; background: rgba(60,255,130,.22); }
+  #surge .lab { position:relative; z-index:2; }
+  #surge.ready { border-color: var(--grn); box-shadow: 0 0 18px rgba(60,255,130,.45); color: var(--grn); }
+  #surge.ready .fill { width:100% !important; background: rgba(60,255,130,.30); }
+
+  #center {
+    position:absolute; inset:0; display:none; flex-direction:column;
+    align-items:center; justify-content:center; gap:12px; text-align:center; padding:26px;
+    background: radial-gradient(ellipse at center, rgba(4,6,5,.55), rgba(4,6,5,.9));
+  }
+  #center.show { display:flex; }
+  #title { font-size: clamp(26px,8.5vmin,46px); font-weight:900; letter-spacing:3px; color:#eafff1;
+           text-shadow: 0 0 18px rgba(60,255,130,.6); }
+  #title.bad { color:#ffd2d4; text-shadow: 0 0 18px rgba(255,60,70,.6); }
+  #sub { font-size: clamp(12px,3.6vmin,16px); color:#9fdcb6; max-width:280px; line-height:1.5; }
+  #blink { color: var(--amber); font-weight:800; letter-spacing:1px; animation: blink 1.1s steps(2,start) infinite; }
+  @keyframes blink { 50% { opacity:0; } }
+</style>
+</head>
+<body>
+  <div id="stage">
+    <canvas id="screen"></canvas>
+    <div id="hud">
+      <div id="top">
+        <div class="stat" id="s-take"><b>0%</b><span>TAKEOVER</span></div>
+        <div class="stat" id="s-bots" style="text-align:center"><b>0</b><span>BOTS</span></div>
+        <div class="stat" id="s-nodes" style="text-align:right"><b>1/8</b><span>NODES</span></div>
+      </div>
+      <div id="bar"></div>
+    </div>
+    <div id="surge"><div class="fill"></div><div class="lab">SURGE</div></div>
+    <div id="center" class="show">
+      <div id="title">EVILBOTNET</div>
+      <div id="sub">Lead your swarm with your finger. Smother a node to <b>infect</b> it. Avoid the red <b>sentinels</b> — they delete bots and scrub your nodes. Own all 8 to win.</div>
+      <div id="blink">TAP TO DEPLOY</div>
+    </div>
+  </div>
+
+<script>
+(async function () {
+  const canvas = document.getElementById("screen");
+  const ctx = canvas.getContext("2d", { alpha: false });
+  ctx.imageSmoothingEnabled = false;
+
+  const elTake = document.querySelector("#s-take b");
+  const elBots = document.querySelector("#s-bots b");
+  const elNodes = document.querySelector("#s-nodes b");
+  const elBar = document.getElementById("bar");
+  const elSurge = document.getElementById("surge");
+  const elSurgeFill = elSurge.querySelector(".fill");
+  const elCenter = document.getElementById("center");
+  const elTitle = document.getElementById("title");
+  const elSub = document.getElementById("sub");
+  const elBlink = document.getElementById("blink");
+
+  let w;
+  try {
+    const res = await fetch("game.wasm");
+    const bytes = await res.arrayBuffer();
+    const mod = await WebAssembly.instantiate(bytes, {});
+    w = mod.instance.exports;
+  } catch (e) {
+    elTitle.textContent = "LOAD ERROR"; elSub.textContent = String(e); return;
+  }
+
+  const W = w.getWidth(), H = w.getHeight();
+  canvas.width = W; canvas.height = H;
+  const imageData = ctx.createImageData(W, H);
+  const fbPtr = w.getFramebuffer();
+  const view = () => new Uint8ClampedArray(w.memory.buffer, fbPtr, W * H * 4);
+
+  w.init((Date.now() & 0x7fffffff) >>> 0);
+
+  // ---- input ----
+  function rally(clientX, clientY) {
+    const r = canvas.getBoundingClientRect();
+    w.pointerMove((clientX - r.left) / r.width, (clientY - r.top) / r.height);
+  }
+  function pt(e) {
+    const t = (e.touches && e.touches[0]) ? e.touches[0] : e;
+    return [t.clientX, t.clientY];
+  }
+  canvas.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    const [x, y] = pt(e); rally(x, y);
+    const s = w.getState();
+    if (s === 0 || s === 2 || s === 3) w.press(); // deploy / restart
+  }, { passive: false });
+  canvas.addEventListener("pointermove", (e) => {
+    e.preventDefault(); const [x, y] = pt(e); rally(x, y);
+  }, { passive: false });
+
+  elSurge.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    if (w.getState() === 1) w.press(); // surge
+  }, { passive: false });
+
+  // keyboard: WASD / arrows steer rally point, space = deploy/surge/restart
+  const held = { l:0, r:0, u:0, d:0 };
+  function sendKeys() { w.keyDir(held.r - held.l, held.d - held.u); }
+  addEventListener("keydown", (e) => {
+    if (e.code === "ArrowLeft"  || e.code === "KeyA") held.l = 1;
+    else if (e.code === "ArrowRight" || e.code === "KeyD") held.r = 1;
+    else if (e.code === "ArrowUp"    || e.code === "KeyW") held.u = 1;
+    else if (e.code === "ArrowDown"  || e.code === "KeyS") held.d = 1;
+    else if (e.code === "Space" || e.code === "Enter") { e.preventDefault(); w.press(); return; }
+    else return;
+    e.preventDefault(); sendKeys();
+  });
+  addEventListener("keyup", (e) => {
+    if (e.code === "ArrowLeft"  || e.code === "KeyA") held.l = 0;
+    else if (e.code === "ArrowRight" || e.code === "KeyD") held.r = 0;
+    else if (e.code === "ArrowUp"    || e.code === "KeyW") held.u = 0;
+    else if (e.code === "ArrowDown"  || e.code === "KeyS") held.d = 0;
+    else return;
+    sendKeys();
+  });
+
+  // ---- HUD ----
+  function hud() {
+    const s = w.getState();
+    const take = w.getTakeover();
+    elTake.textContent = take + "%";
+    elBots.textContent = w.getBots();
+    elNodes.textContent = w.getNodesOwned() + "/" + w.getNodesTotal();
+    elBar.style.width = take + "%";
+
+    const sg = w.getSurge();
+    elSurgeFill.style.width = (sg * 100) + "%";
+    elSurge.classList.toggle("ready", sg >= 1 && s === 1);
+
+    if (s === 0) {
+      elCenter.classList.add("show"); elTitle.className = "";
+      elTitle.textContent = "EVILBOTNET";
+      elSub.innerHTML = "Lead your swarm with your finger. Smother a node to <b>infect</b> it. Avoid the red <b>sentinels</b>. Own all 8 to win.";
+      elBlink.textContent = "TAP TO DEPLOY";
+    } else if (s === 2) {
+      elCenter.classList.add("show"); elTitle.className = "";
+      elTitle.textContent = "NETWORK OWNED";
+      elSub.textContent = "Full takeover. The botnet is yours.";
+      elBlink.textContent = "TAP TO REDEPLOY";
+    } else if (s === 3) {
+      elCenter.classList.add("show"); elTitle.className = "bad";
+      elTitle.textContent = "SWARM WIPED";
+      elSub.textContent = "EDR deleted every bot. Owned " + w.getNodesOwned() + "/" + w.getNodesTotal() + " nodes.";
+      elBlink.textContent = "TAP TO REDEPLOY";
+    } else {
+      elCenter.classList.remove("show");
+    }
+  }
+
+  // ---- loop ----
+  let last = performance.now();
+  function loop(now) {
+    let dt = (now - last) / 1000; last = now;
+    if (dt > 0.1) dt = 0.1;
+    w.update(dt);
+    imageData.data.set(view());
+    ctx.putImageData(imageData, 0, 0);
+    hud();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
