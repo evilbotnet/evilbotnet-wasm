@@ -49,10 +49,13 @@
   #surge .lab { position:relative; z-index:2; }
   #surge.ready { border-color: var(--grn); box-shadow: 0 0 18px rgba(60,255,130,.45); color: var(--grn); }
   #surge.ready .fill { width:100% !important; background: rgba(60,255,130,.30); }
+  #surge.hidden { display:none; }
 
+  /* Overlay is click-through: taps fall through to the canvas, which handles deploy/restart. */
   #center {
-    position:absolute; inset:0; display:none; flex-direction:column;
-    align-items:center; justify-content:center; gap:12px; text-align:center; padding:26px;
+    position:absolute; inset:0; display:none; pointer-events:none;
+    flex-direction:column; align-items:center; justify-content:center;
+    gap:12px; text-align:center; padding:26px;
     background: radial-gradient(ellipse at center, rgba(4,6,5,.55), rgba(4,6,5,.9));
   }
   #center.show { display:flex; }
@@ -66,7 +69,7 @@
 </head>
 <body>
   <div id="stage">
-    <canvas id="screen"></canvas>
+    <canvas id="screen" width="360" height="600"></canvas>
     <div id="hud">
       <div id="top">
         <div class="stat" id="s-take"><b>0%</b><span>TAKEOVER</span></div>
@@ -75,16 +78,16 @@
       </div>
       <div id="bar"></div>
     </div>
-    <div id="surge"><div class="fill"></div><div class="lab">SURGE</div></div>
+    <div id="surge" class="hidden"><div class="fill"></div><div class="lab">SURGE</div></div>
     <div id="center" class="show">
       <div id="title">EVILBOTNET</div>
-      <div id="sub">Lead your swarm with your finger. Smother a node to <b>infect</b> it. Avoid the red <b>sentinels</b> — they delete bots and scrub your nodes. Own all 8 to win.</div>
-      <div id="blink">TAP TO DEPLOY</div>
+      <div id="sub">Loading core&hellip;</div>
+      <div id="blink">&nbsp;</div>
     </div>
   </div>
 
 <script>
-(async function () {
+(function () {
   const canvas = document.getElementById("screen");
   const ctx = canvas.getContext("2d", { alpha: false });
   ctx.imageSmoothingEnabled = false;
@@ -100,57 +103,51 @@
   const elSub = document.getElementById("sub");
   const elBlink = document.getElementById("blink");
 
-  let w;
-  try {
-    const res = await fetch("game.wasm");
-    const bytes = await res.arrayBuffer();
-    const mod = await WebAssembly.instantiate(bytes, {});
-    w = mod.instance.exports;
-  } catch (e) {
-    elTitle.textContent = "LOAD ERROR"; elSub.textContent = String(e); return;
+  let w = null, ready = false, loading = false, started = false;
+  let W = 360, H = 600, imageData = null, fbPtr = 0;
+
+  function overlay(title, sub, blink, bad) {
+    elCenter.classList.add("show");
+    elTitle.className = bad ? "bad" : "";
+    elTitle.textContent = title;
+    elSub.innerHTML = sub;
+    elBlink.textContent = blink || "\u00a0";
   }
 
-  const W = w.getWidth(), H = w.getHeight();
-  canvas.width = W; canvas.height = H;
-  const imageData = ctx.createImageData(W, H);
-  const fbPtr = w.getFramebuffer();
-  const view = () => new Uint8ClampedArray(w.memory.buffer, fbPtr, W * H * 4);
-
-  w.init((Date.now() & 0x7fffffff) >>> 0);
-
-  // ---- input ----
-  function rally(clientX, clientY) {
-    const r = canvas.getBoundingClientRect();
-    w.pointerMove((clientX - r.left) / r.width, (clientY - r.top) / r.height);
-  }
+  // ---- input: bound up front, guarded by `ready` so the deploy tap works the instant load finishes ----
   function pt(e) {
     const t = (e.touches && e.touches[0]) ? e.touches[0] : e;
     return [t.clientX, t.clientY];
   }
+  function rally(clientX, clientY) {
+    const r = canvas.getBoundingClientRect();
+    w.pointerMove((clientX - r.left) / r.width, (clientY - r.top) / r.height);
+  }
   canvas.addEventListener("pointerdown", (e) => {
     e.preventDefault();
+    if (!ready) { if (!loading) load(); return; } // tap-to-retry if a load failed
     const [x, y] = pt(e); rally(x, y);
     const s = w.getState();
     if (s === 0 || s === 2 || s === 3) w.press(); // deploy / restart
   }, { passive: false });
   canvas.addEventListener("pointermove", (e) => {
+    if (!ready) return;
     e.preventDefault(); const [x, y] = pt(e); rally(x, y);
   }, { passive: false });
 
   elSurge.addEventListener("pointerdown", (e) => {
     e.preventDefault();
-    if (w.getState() === 1) w.press(); // surge
+    if (ready && w.getState() === 1) w.press();
   }, { passive: false });
 
-  // keyboard: WASD / arrows steer rally point, space = deploy/surge/restart
   const held = { l:0, r:0, u:0, d:0 };
-  function sendKeys() { w.keyDir(held.r - held.l, held.d - held.u); }
+  function sendKeys() { if (ready) w.keyDir(held.r - held.l, held.d - held.u); }
   addEventListener("keydown", (e) => {
     if (e.code === "ArrowLeft"  || e.code === "KeyA") held.l = 1;
     else if (e.code === "ArrowRight" || e.code === "KeyD") held.r = 1;
     else if (e.code === "ArrowUp"    || e.code === "KeyW") held.u = 1;
     else if (e.code === "ArrowDown"  || e.code === "KeyS") held.d = 1;
-    else if (e.code === "Space" || e.code === "Enter") { e.preventDefault(); w.press(); return; }
+    else if (e.code === "Space" || e.code === "Enter") { e.preventDefault(); if (ready) w.press(); return; }
     else return;
     e.preventDefault(); sendKeys();
   });
@@ -163,7 +160,38 @@
     sendKeys();
   });
 
-  // ---- HUD ----
+  // ---- load with timeout + visible failure (so flaky wifi shows a retry, not a dead screen) ----
+  async function load() {
+    loading = true;
+    overlay("EVILBOTNET", "Loading core&hellip;", "");
+    try {
+      const ctrl = new AbortController();
+      const to = setTimeout(() => ctrl.abort(), 20000);
+      const res = await fetch("game.wasm", { cache: "no-store", signal: ctrl.signal });
+      clearTimeout(to);
+      if (!res.ok) throw new Error("HTTP " + res.status + " fetching game.wasm");
+      const bytes = await res.arrayBuffer();
+      const mod = await WebAssembly.instantiate(bytes, {});
+      w = mod.instance.exports;
+
+      W = w.getWidth(); H = w.getHeight();
+      canvas.width = W; canvas.height = H;
+      imageData = ctx.createImageData(W, H);
+      fbPtr = w.getFramebuffer();
+      w.init((Date.now() & 0x7fffffff) >>> 0);
+
+      ready = true; loading = false;
+      elSurge.classList.remove("hidden");
+      if (!started) { started = true; requestAnimationFrame(loop); }
+    } catch (e) {
+      loading = false; ready = false;
+      const msg = (e && e.message) ? e.message : String(e);
+      overlay("LOAD FAILED", msg + " &mdash; check your connection.", "TAP TO RETRY", true);
+    }
+  }
+
+  function view() { return new Uint8ClampedArray(w.memory.buffer, fbPtr, W * H * 4); }
+
   function hud() {
     const s = w.getState();
     const take = w.getTakeover();
@@ -177,26 +205,20 @@
     elSurge.classList.toggle("ready", sg >= 1 && s === 1);
 
     if (s === 0) {
-      elCenter.classList.add("show"); elTitle.className = "";
-      elTitle.textContent = "EVILBOTNET";
-      elSub.innerHTML = "Lead your swarm with your finger. Smother a node to <b>infect</b> it. Avoid the red <b>sentinels</b>. Own all 8 to win.";
-      elBlink.textContent = "TAP TO DEPLOY";
+      overlay("EVILBOTNET",
+        "Lead your swarm with your finger. Smother a node to <b>infect</b> it. Avoid the red <b>sentinels</b>. Own all 8 to win.",
+        "TAP TO DEPLOY");
     } else if (s === 2) {
-      elCenter.classList.add("show"); elTitle.className = "";
-      elTitle.textContent = "NETWORK OWNED";
-      elSub.textContent = "Full takeover. The botnet is yours.";
-      elBlink.textContent = "TAP TO REDEPLOY";
+      overlay("NETWORK OWNED", "Full takeover. The botnet is yours.", "TAP TO REDEPLOY");
     } else if (s === 3) {
-      elCenter.classList.add("show"); elTitle.className = "bad";
-      elTitle.textContent = "SWARM WIPED";
-      elSub.textContent = "EDR deleted every bot. Owned " + w.getNodesOwned() + "/" + w.getNodesTotal() + " nodes.";
-      elBlink.textContent = "TAP TO REDEPLOY";
+      overlay("SWARM WIPED",
+        "EDR dismantled the botnet. Owned " + w.getNodesOwned() + "/" + w.getNodesTotal() + " nodes.",
+        "TAP TO REDEPLOY", true);
     } else {
       elCenter.classList.remove("show");
     }
   }
 
-  // ---- loop ----
   let last = performance.now();
   function loop(now) {
     let dt = (now - last) / 1000; last = now;
@@ -207,7 +229,8 @@
     hud();
     requestAnimationFrame(loop);
   }
-  requestAnimationFrame(loop);
+
+  load();
 })();
 </script>
 </body>
