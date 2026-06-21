@@ -49,6 +49,12 @@ const GHi: i32 = @intCast(GH);
 const MAX_ROCKS: usize = 14;
 const ROCK_MARGIN: f32 = 9; // soft repulsion band outside a rock
 
+// firewall: a horizontal energy barrier that cycles on/off
+const FW_ON_DUR: f32 = 3.0;
+const FW_OFF_DUR: f32 = 2.6;
+const FW_BAND: f32 = 7; // hard no-cross half-thickness
+const FW_REACH: f32 = 26; // soft repulsion band
+
 // HEAT: rises with takeover; ramps sentinel pressure for a real endgame
 var heat: f32 = 0;
 
@@ -61,6 +67,12 @@ const OWN_LOSE_AT: f32 = 0.55; // hysteresis: lose a captured node only below th
 const OWN_BONUS_BOTS: usize = 45;
 const OWN_SPAWN_DT: f32 = 2.6;
 const OWN_SPAWN_N: usize = 5;
+
+// node types
+const NT_NORMAL: u8 = 0;
+const NT_SPAWNER: u8 = 1; // owned: spawns far more bots — a prize node
+const NT_SHIELD: u8 = 2; // infection crawls unless you SURGE on it
+const NT_HONEY: u8 = 3; // capturing it spawns sentinels — punishes greed
 
 const SURGE_DUR: f32 = 1.2;
 const SURGE_CD: f32 = 4.0;
@@ -89,6 +101,10 @@ var cfg_cooldown: f32 = 1.0; // ability-cooldown multiplier
 var unlock_emp: bool = false;
 var unlock_fork: bool = false;
 var unlock_cloak: bool = false;
+var cfg_shield: usize = 0;
+var cfg_spawner: usize = 0;
+var cfg_honey: usize = 0;
+var cfg_firewall: bool = false;
 
 const COLLAPSE_N: usize = 8; // held below this many bots...
 const COLLAPSE_T: f32 = 4.0; // ...for this long = botnet dismantled (loss)
@@ -135,6 +151,9 @@ const COL_BOT_SURGE = rgb(180, 255, 220);
 const COL_CLEAN = rgb(70, 120, 150);
 const COL_CONTEST = rgb(255, 190, 70);
 const COL_OWNED = rgb(60, 255, 110);
+const COL_SPAWN = rgb(60, 230, 210); // spawner (teal)
+const COL_SHIELD = rgb(96, 156, 255); // shielded (blue)
+const COL_HONEY = rgb(255, 176, 56); // honeypot (amber)
 const COL_SENT = rgb(255, 60, 70);
 const COL_ROCK = rgb(30, 46, 42);
 const COL_ROCK_HI = rgb(58, 90, 80);
@@ -265,6 +284,7 @@ var node_inf: [MAX_NODES]f32 = undefined;
 var node_owned: [MAX_NODES]bool = undefined;
 var node_spawn_t: [MAX_NODES]f32 = undefined;
 var node_pulse: [MAX_NODES]f32 = undefined;
+var node_type: [MAX_NODES]u8 = undefined;
 
 var link_a: [MAX_LINKS]usize = undefined;
 var link_b: [MAX_LINKS]usize = undefined;
@@ -289,6 +309,13 @@ var rock_x: [MAX_ROCKS]f32 = undefined;
 var rock_y: [MAX_ROCKS]f32 = undefined;
 var rock_r: [MAX_ROCKS]f32 = undefined;
 var rock_count: usize = 0;
+
+// firewall barrier
+var fw_active: bool = false;
+var fw_y: f32 = 0;
+var fw_on: bool = false; // currently blocking
+var fw_t: f32 = 0; // time left in current phase
+var fw_emp_t: f32 = 0; // EMP-forced-down timer
 
 const State = enum(i32) { ready = 0, playing = 1, won = 2, lost = 3 };
 var state: State = .ready;
@@ -455,6 +482,27 @@ fn resolveWalls(x: *f32, y: *f32) void {
     }
 }
 
+fn fwBlocking() bool {
+    return fw_active and fw_on and fw_emp_t <= 0;
+}
+fn fwForce(y: f32, ay: *f32) void {
+    if (!fwBlocking()) return;
+    const dy = y - fw_y;
+    const ad = @abs(dy);
+    if (ad < FW_REACH) {
+        const side: f32 = if (dy >= 0) 1 else -1;
+        const f = 1.0 - ad / FW_REACH;
+        ay.* += side * f * BOT_FORCE * 2.2;
+    }
+}
+fn fwResolve(y: *f32) void {
+    if (!fwBlocking()) return;
+    const dy = y.* - fw_y;
+    if (@abs(dy) < FW_BAND) {
+        y.* = fw_y + (if (dy >= 0) FW_BAND else -FW_BAND);
+    }
+}
+
 // ---------------- setup ----------------
 fn placeNodes() void {
     node_x[0] = W / 2;
@@ -489,9 +537,27 @@ fn placeNodes() void {
         node_owned[i] = false;
         node_spawn_t[i] = 0;
         node_pulse[i] = 0;
+        node_type[i] = NT_NORMAL;
     }
     node_inf[0] = 1.0;
     node_owned[0] = true;
+    // assign special types to distinct random non-home nodes
+    assignType(NT_SPAWNER, cfg_spawner);
+    assignType(NT_SHIELD, cfg_shield);
+    assignType(NT_HONEY, cfg_honey);
+}
+
+fn assignType(t: u8, count: usize) void {
+    if (node_count <= 1) return;
+    var n: usize = 0;
+    var tries: usize = 0;
+    while (n < count and tries < 200) : (tries += 1) {
+        const idx = 1 + (rnd() % (node_count - 1));
+        if (node_type[idx] == NT_NORMAL) {
+            node_type[idx] = t;
+            n += 1;
+        }
+    }
 }
 
 fn addLink(a: usize, b: usize) void {
@@ -565,6 +631,18 @@ fn spawnSentinel() void {
     sent_count += 1;
 }
 
+fn spawnSentinelAt(x: f32, y: f32) void {
+    if (sent_count >= MAX_SENT) return;
+    sent_x[sent_count] = x;
+    sent_y[sent_count] = y;
+    sent_vx[sent_count] = 0;
+    sent_vy[sent_count] = 0;
+    sent_kcd[sent_count] = 0;
+    sent_stun[sent_count] = 0;
+    sent_stuck[sent_count] = 0;
+    sent_count += 1;
+}
+
 export fn init(seed: u32) void {
     rng_state = seed | 1;
     clear(COL_BG);
@@ -599,6 +677,13 @@ export fn init(seed: u32) void {
     buildWalls();
     placeNodes();
     buildLinks();
+
+    // firewall barrier (upper field; gates the nodes behind it)
+    fw_active = cfg_firewall;
+    fw_y = @as(f32, @floatFromInt(H)) * 0.40;
+    fw_on = true;
+    fw_t = FW_ON_DUR;
+    fw_emp_t = 0;
 
     var i: usize = 0;
     while (i < cfg_start_bots) : (i += 1) {
@@ -742,6 +827,7 @@ fn stepBots(dt: f32) void {
 
         // maze walls (added after the clamp; bots must never pass through)
         wallForce(bot_x[i], bot_y[i], &ax, &ay);
+        fwForce(bot_y[i], &ay);
 
         bot_vx[i] += ax * dt;
         bot_vy[i] += ay * dt;
@@ -756,6 +842,7 @@ fn stepBots(dt: f32) void {
         bot_x[i] = clampf(bot_x[i], 3, W - 3);
         bot_y[i] = clampf(bot_y[i], 72, H - 3);
         resolveWalls(&bot_x[i], &bot_y[i]);
+        fwResolve(&bot_y[i]);
     }
 }
 
@@ -779,7 +866,9 @@ fn stepNodes(dt: f32) void {
         const prev_owned = node_owned[i];
         if (near > 0) {
             const k = clampf(near / INF_CAP, 0, 1);
-            node_inf[i] += k * INF_GAIN * cfg_infect * dt;
+            var gain = k * INF_GAIN * cfg_infect;
+            if (node_type[i] == NT_SHIELD) gain *= if (surge_t > 0) 1.5 else 0.28; // SURGE to crack the shield
+            node_inf[i] += gain * dt;
         } else {
             node_inf[i] -= INF_DECAY * dt;
         }
@@ -800,6 +889,13 @@ fn stepNodes(dt: f32) void {
             addShake(5);
             var k: usize = 0;
             while (k < OWN_BONUS_BOTS) : (k += 1) addBot(node_x[i] + rndRange(-14, 14), node_y[i] + rndRange(-14, 14));
+            if (node_type[i] == NT_HONEY) {
+                // trap sprung: EDR pours in
+                burst(node_x[i], node_y[i], 24, 160, COL_SENT);
+                addShake(10);
+                var hs: usize = 0;
+                while (hs < 2) : (hs += 1) spawnSentinelAt(node_x[i] + rndRange(-16, 16), node_y[i] + rndRange(-16, 16));
+            }
         } else if (!node_owned[i] and prev_owned) {
             burst(node_x[i], node_y[i], 18, 130, COL_SENT);
         }
@@ -807,9 +903,11 @@ fn stepNodes(dt: f32) void {
         if (node_owned[i]) {
             node_spawn_t[i] -= dt;
             if (node_spawn_t[i] <= 0) {
-                node_spawn_t[i] = OWN_SPAWN_DT;
+                const is_spawner = node_type[i] == NT_SPAWNER;
+                node_spawn_t[i] = if (is_spawner) OWN_SPAWN_DT * 0.5 else OWN_SPAWN_DT;
+                const n: usize = if (is_spawner) OWN_SPAWN_N * 3 else OWN_SPAWN_N;
                 var k: usize = 0;
-                while (k < OWN_SPAWN_N) : (k += 1) addBot(node_x[i] + rndRange(-10, 10), node_y[i] + rndRange(-10, 10));
+                while (k < n) : (k += 1) addBot(node_x[i] + rndRange(-10, 10), node_y[i] + rndRange(-10, 10));
             }
         }
     }
@@ -884,6 +982,7 @@ fn stepSentinels(dt: f32) void {
         var ay = dy * spd;
         // steer around walls
         wallForce(sent_x[s], sent_y[s], &ax, &ay);
+        fwForce(sent_y[s], &ay);
         sent_vx[s] = ax + rndRange(-8, 8);
         sent_vy[s] = ay + rndRange(-8, 8);
 
@@ -894,6 +993,7 @@ fn stepSentinels(dt: f32) void {
         sent_x[s] = clampf(sent_x[s], 4, W - 4);
         sent_y[s] = clampf(sent_y[s], 74, H - 4);
         resolveWalls(&sent_x[s], &sent_y[s]);
+        fwResolve(&sent_y[s]);
 
         // lure/unstick: a sentinel wedged against a wall snags briefly (a real
         // tactic to shake pursuit) but kicks itself free so it never clogs.
@@ -979,6 +1079,16 @@ export fn update(dt_in: f32) void {
     if (shake_mag > 0) {
         shake_mag -= dt * 22;
         if (shake_mag < 0) shake_mag = 0;
+    }
+
+    // firewall cycle
+    if (fw_active) {
+        if (fw_emp_t > 0) fw_emp_t -= dt;
+        fw_t -= dt;
+        if (fw_t <= 0) {
+            fw_on = !fw_on;
+            fw_t = if (fw_on) FW_ON_DUR else FW_OFF_DUR;
+        }
     }
 
     // parallax motes drift down slowly and wrap
@@ -1091,6 +1201,27 @@ fn render() void {
         circleOutline(rx, ry, rr, scaleColor(COL_ROCK_HI, 0.5));
     }
 
+    // firewall barrier
+    if (fw_active) {
+        const fy = fw_y;
+        if (fwBlocking()) {
+            var gg: f32 = -3;
+            while (gg <= 3) : (gg += 1) {
+                const a = 1.0 - @abs(gg) / 4.0;
+                fillRect(6, fy + gg, W - 12, 1, scaleColor(rgb(255, 70, 55), a * 0.9));
+            }
+            var xx: f32 = @mod(anim_t * 40.0, 18.0);
+            while (xx < W - 8) : (xx += 18) {
+                fillRect(xx, fy - 1, 10, 2, rgb(255, 184, 150));
+            }
+        } else {
+            var xx: f32 = 8;
+            while (xx < W - 8) : (xx += 16) {
+                fillRect(xx, fy, 7, 1, rgb(78, 36, 32));
+            }
+        }
+    }
+
     var l: usize = 0;
     while (l < link_count) : (l += 1) {
         const a = link_a[l];
@@ -1115,6 +1246,26 @@ fn render() void {
         }
         circleOutline(node_x[i], node_y[i], NODE_DRAW_R, ring);
         circleOutline(node_x[i], node_y[i], NODE_DRAW_R - 1, scaleColor(ring, 0.6));
+        // type accent ring
+        const fi = @as(f32, @floatFromInt(i));
+        switch (node_type[i]) {
+            NT_SPAWNER => {
+                const pb = 0.55 + 0.45 * pulse(anim_t * 3 + fi);
+                circleOutline(node_x[i], node_y[i], NODE_DRAW_R + 3, scaleColor(COL_SPAWN, pb));
+            },
+            NT_SHIELD => {
+                if (!node_owned[i]) {
+                    const sc = if (surge_t > 0) COL_SHIELD else scaleColor(COL_SHIELD, 0.55);
+                    circleOutline(node_x[i], node_y[i], NODE_DRAW_R + 4, sc);
+                    circleOutline(node_x[i], node_y[i], NODE_DRAW_R + 3, scaleColor(sc, 0.5));
+                }
+            },
+            NT_HONEY => {
+                const pb = 0.5 + 0.5 * pulse(anim_t * 2.2 + fi);
+                circleOutline(node_x[i], node_y[i], NODE_DRAW_R + 3, scaleColor(COL_HONEY, pb));
+            },
+            else => {},
+        }
         const core = 2 + inf * (NODE_DRAW_R - 3);
         fillCircle(node_x[i], node_y[i], core, scaleColor(ring, 0.85));
         if (node_owned[i]) {
@@ -1270,6 +1421,7 @@ export fn abEmp() void {
     while (s < sent_count) : (s += 1) {
         if (dist2(sent_x[s], sent_y[s], cx, cy) < EMP_R * EMP_R) sent_stun[s] = EMP_DUR;
     }
+    if (fw_active) fw_emp_t = EMP_DUR; // EMP also drops the firewall
 }
 export fn abFork() void {
     if (state != .playing or !unlock_fork or fork_cd > 0) return;
@@ -1332,6 +1484,19 @@ export fn setUnlock(id: i32, on: i32) void {
         else => {},
     }
 }
+export fn setSpecials(shield: i32, spawner: i32, honey: i32) void {
+    cfg_shield = clampUsize(shield, 0, MAX_NODES);
+    cfg_spawner = clampUsize(spawner, 0, MAX_NODES);
+    cfg_honey = clampUsize(honey, 0, MAX_NODES);
+}
+export fn setFirewall(on: i32) void {
+    cfg_firewall = on != 0;
+}
+export fn getFirewall() i32 {
+    if (!fw_active) return 0; // none
+    if (fwBlocking()) return 2; // blocking
+    return 1; // open / down
+}
 export fn getNodeX(i: i32) f32 {
     const u: usize = @intCast(i);
     return if (u < node_count) node_x[u] else -1;
@@ -1343,6 +1508,10 @@ export fn getNodeY(i: i32) f32 {
 export fn getNodeOwnedI(i: i32) i32 {
     const u: usize = @intCast(i);
     return if (u < node_count and node_owned[u]) 1 else 0;
+}
+export fn getNodeType(i: i32) i32 {
+    const u: usize = @intCast(i);
+    return if (u < node_count) @intCast(node_type[u]) else 0;
 }
 
 export fn pointerMove(nx: f32, ny: f32) void {

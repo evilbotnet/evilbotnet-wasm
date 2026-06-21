@@ -30,6 +30,14 @@ Lead sentinels into the rock obstacles — they snag briefly, which buys you tim
 Captures are sticky (ownership hysteresis), so you can push outward — but leave a
 node undefended too long and a sentinel will grind it back.
 
+**Node types & hazards** (introduced as levels escalate):
+
+- **Spawner** (teal) — once owned, floods out bots fast. Grab it early.
+- **Shielded** (blue) — infection barely moves unless you **SURGE** on it to crack the shield.
+- **Honeypot** (amber) — capturing it springs a trap and spawns sentinels. Don't grab greedily.
+- **Firewall** (red) — a barrier that cycles on/off across the field, blocking bots *and*
+  sentinels. Time your push through the gaps — or **EMP** it to drop it on demand.
+
 ## How it works
 
 - `src/main.zig` — the whole game: xorshift RNG, a **spatial-hash grid** for

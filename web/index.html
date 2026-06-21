@@ -82,6 +82,11 @@
   #buildStats .sv { color:#eafff1; font-weight:700; }
   #buildStats .full { grid-column:1/3; }
   #buildStats .full .sv { color:var(--tea); }
+  .legend { display:flex; flex-direction:column; gap:3px; width:min(86%,330px); margin-top:4px;
+    font-size:10.5px; color:#9fdcb6; opacity:.9; letter-spacing:.4px; pointer-events:none; }
+  .legend .lr { display:flex; align-items:center; gap:7px; }
+  .legend i { width:10px; height:10px; border-radius:50%; flex:none; box-shadow:0 0 5px currentColor; }
+  .legend .fw { width:13px; height:3px; border-radius:1px; }
   .card { pointer-events:auto; cursor:pointer; border:1px solid rgba(60,255,130,.35); border-radius:12px;
     padding:13px 15px; background:rgba(10,20,15,.7); text-align:left; transition: border-color .1s, transform .05s;
     animation: cardIn .45s ease both; }
@@ -113,6 +118,7 @@
     <div id="menu" class="panel show">
       <div id="title">EVILBOTNET</div>
       <div id="sub">Loading core&hellip;</div>
+      <div class="legend" id="legendMenu"></div>
       <div id="blink">&nbsp;</div>
     </div>
 
@@ -127,6 +133,7 @@
       <div id="title2" style="font-size:clamp(24px,7.5vmin,40px);font-weight:900;letter-spacing:3px;color:#ffd2d4;text-shadow:0 0 18px rgba(255,60,70,.5)">SWARM WIPED</div>
       <div id="overSub" style="font-size:clamp(13px,4vmin,17px);color:#9fdcb6;line-height:1.5"></div>
       <div id="overStats" style="display:grid;grid-template-columns:1fr 1fr;gap:2px 18px;width:min(86%,330px);font-size:11px;color:#9fdcb6;opacity:.92;padding:9px 11px;border-radius:10px;background:rgba(10,20,15,.5);border:1px solid rgba(60,255,130,.14);letter-spacing:.5px"></div>
+      <div class="legend" id="legendOver"></div>
       <div style="color:var(--amber);font-weight:800;letter-spacing:1px;animation:blink 1.1s steps(2,start) infinite">TAP TO RUN AGAIN</div>
     </div>
   </div>
@@ -193,7 +200,13 @@
     const ss=Math.min(L, 6);
     const sc=Math.min(2+L, 14);
     const walls=L<=2 ? 0 : Math.min(L-2, 5);
+    // special node types ramp in gradually; firewall from L4
+    const spawner = L>=2 ? 1 : 0;
+    const shield  = L>=3 ? (L>=7?2:1) : 0;
+    const honey   = L>=4 ? (L>=8?2:1) : 0;
+    const fw      = L>=4;
     w.setNodes(nodes); w.setStartSent(ss); w.setSentCap(sc); w.setWalls(walls);
+    w.setSpecials(shield, spawner, honey); w.setFirewall(fw?1:0);
     w.setSwarmCap(m.swarmCap); w.setStartBots(m.startBots);
     w.setInfect(m.infect); w.setBotSpeed(m.botSpeed); w.setCooldown(m.cooldown);
     w.setUnlock(1, u.emp?1:0); w.setUnlock(2, u.fork?1:0); w.setUnlock(3, u.cloak?1:0);
@@ -206,6 +219,13 @@
   function hidePanels(){ menu.classList.remove("show"); draftEl.classList.remove("show"); overEl.classList.remove("show"); }
 
   let draftReadyAt = 0;
+  function legendHTML(){
+    return ''+
+      '<div class="lr"><i style="color:#3ce6d2;background:#3ce6d2"></i>Spawner &mdash; floods bots when owned</div>'+
+      '<div class="lr"><i style="color:#609cff;background:#609cff"></i>Shielded &mdash; SURGE on it to crack</div>'+
+      '<div class="lr"><i style="color:#ffb038;background:#ffb038"></i>Honeypot &mdash; capturing it spawns sentinels</div>'+
+      '<div class="lr"><i class="fw" style="color:#ff463c;background:#ff463c"></i>Firewall &mdash; time the gaps, or EMP it down</div>';
+  }
   function buildStatsHTML(){
     const m=run.mods, u=run.unlocked;
     const ab=["SURGE"]; if(u.emp)ab.push("EMP"); if(u.fork)ab.push("FORK"); if(u.cloak)ab.push("CLOAK");
@@ -251,6 +271,7 @@
     overSub.innerHTML = "Reached <b style='color:#eafff1'>Level "+run.level+"</b> &middot; Score <b style='color:var(--amber)'>"+run.score+"</b><br>"+
       "Best: Level <b>"+bestLevel+"</b> &middot; "+bestScore+" pts";
     $("overStats").innerHTML = buildStatsHTML();
+    $("legendOver").innerHTML = legendHTML();
     overEl.classList.add("show");
   }
   function endRun(){ if(meta==="playing"){ meta="over"; onGameOver(true); } }
@@ -315,6 +336,7 @@
       w.setNodes(3); w.setStartSent(1); w.setWalls(0); w.init((Date.now()&0x7fffffff)>>>0); // idle demo swarm behind menu
       ready=true; loading=false; meta="menu";
       mSub.innerHTML="Lead your swarm onto a node to <b>infect</b> it. Clear every node to beat the level, then <b>draft an upgrade</b>. Each level escalates &mdash; how deep can you push?";
+      $("legendMenu").innerHTML=legendHTML();
       mBlink.textContent="TAP TO DEPLOY";
       if(!started){ started=true; requestAnimationFrame(loop); }
     }catch(e){
