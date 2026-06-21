@@ -15,8 +15,8 @@
   }
   body { display: flex; align-items: center; justify-content: center; }
   #stage {
-    position: relative; aspect-ratio: 360 / 600;
-    height: min(100svh, calc(100vw * 600 / 360)); max-height: 100svh;
+    position: relative; aspect-ratio: 450 / 780;
+    height: min(100svh, calc(100vw * 780 / 450)); max-height: 100svh;
     border-radius: 10px; overflow: hidden;
     box-shadow: 0 0 50px rgba(60,255,130,.16), 0 10px 40px rgba(0,0,0,.6);
   }
@@ -37,6 +37,8 @@
   #s-nodes b { color: var(--amber); }
   #bar { position:absolute; top:72px; left:0; height:3px; background: var(--grn);
          width:0%; box-shadow: 0 0 8px var(--grn); transition: width .15s linear; }
+  #heatbar { position:absolute; top:75px; left:0; height:2px; background: var(--red);
+         width:0%; opacity:.85; box-shadow: 0 0 8px var(--red); transition: width .25s linear; }
 
   #surge {
     position:absolute; bottom:14px; left:50%; transform:translateX(-50%);
@@ -77,6 +79,7 @@
         <div class="stat" id="s-nodes" style="text-align:right"><b>1/8</b><span>NODES</span></div>
       </div>
       <div id="bar"></div>
+      <div id="heatbar"></div>
     </div>
     <div id="surge" class="hidden"><div class="fill"></div><div class="lab">SURGE</div></div>
     <div id="center" class="show">
@@ -96,6 +99,7 @@
   const elBots = document.querySelector("#s-bots b");
   const elNodes = document.querySelector("#s-nodes b");
   const elBar = document.getElementById("bar");
+  const elHeat = document.getElementById("heatbar");
   const elSurge = document.getElementById("surge");
   const elSurgeFill = elSurge.querySelector(".fill");
   const elCenter = document.getElementById("center");
@@ -199,6 +203,7 @@
     elBots.textContent = w.getBots();
     elNodes.textContent = w.getNodesOwned() + "/" + w.getNodesTotal();
     elBar.style.width = take + "%";
+    if (w.getHeat) elHeat.style.width = (w.getHeat() * 100) + "%";
 
     const sg = w.getSurge();
     elSurgeFill.style.width = (sg * 100) + "%";
@@ -206,7 +211,7 @@
 
     if (s === 0) {
       overlay("EVILBOTNET",
-        "Drag to lead your swarm onto a node and <b>infect</b> it. Red <b>sentinels</b> delete bots and scrub nodes &mdash; tap <b>SURGE</b> to shield the swarm and punch a capture through. Own all 8 to win.",
+        "Drag to lead your swarm onto a node and <b>infect</b> it. Red <b>sentinels</b> delete bots and scrub nodes &mdash; tap <b>SURGE</b> to shield the swarm and punch a capture through. Take the whole network &mdash; but every node raises <b>HEAT</b> and the EDR escalates.",
         "TAP TO DEPLOY");
     } else if (s === 2) {
       overlay("NETWORK OWNED", "Full takeover. The botnet is yours.", "TAP TO REDEPLOY");

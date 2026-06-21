@@ -2,7 +2,7 @@
 
 A botnet swarm-command game. **~10 KB of WebAssembly**, no engine, no framework —
 hand-written [Zig](https://ziglang.org) rendering straight into a software framebuffer,
-running a few hundred flocking agents at 60 fps in your browser.
+running up to ~2,400 flocking agents at 60 fps in your browser via a spatial-hash grid.
 
 You are the botmaster. Lead a swarm of bots across a network, smother nodes to
 **infect** them, and seize the whole graph before the red EDR **sentinels** delete
@@ -15,17 +15,18 @@ your swarm or scrub your nodes back to clean.
 - **SURGE button / Space** — 1 s of speed + immunity to deletion (4.5 s cooldown). This is the skill: surge through sentinel walls and escape when cornered.
 - **WASD / arrows** — nudge the rally point (desktop).
 
-**Win:** own all 8 nodes. **Lose:** let EDR dismantle the swarm.
+**Win:** take the whole network (12 nodes). Every capture raises **HEAT** — sentinels get faster, more numerous, and deadlier, so the endgame bites. **Lose:** let EDR dismantle the swarm.
 
 Captures are sticky (ownership hysteresis), so you can push outward — but leave a
 node undefended too long and a sentinel will grind it back.
 
 ## How it works
 
-- `src/main.zig` — the whole game: xorshift RNG, Reynolds flocking
-  (separation / alignment / cohesion + seek + threat-avoidance), node infection
-  with hysteresis, sentinel AI, particles, and a software rasterizer
-  (filled/outlined circles, lines, rects) writing `u32` RGBA pixels.
+- `src/main.zig` — the whole game: xorshift RNG, a **spatial-hash grid** for
+  ~O(n) flocking (separation / alignment / cohesion + seek + threat-avoidance),
+  **maze walls** with steering avoidance, node infection with hysteresis, a
+  **HEAT** escalation system, EDR sentinel AI, particles, **trails + additive
+  bloom**, and a software rasterizer writing `u32` RGBA pixels.
 - Target is `wasm32-freestanding` — **no libc, no allocator.** Fixed global
   arrays, builtin math only (`@sqrt`, `@floor`, no libm trig), so the module is
   tiny and never traps.

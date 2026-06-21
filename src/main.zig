@@ -5,20 +5,20 @@
 //
 // Zig -> wasm32-freestanding. Pure software framebuffer (no WebGL).
 
-const W: usize = 360;
-const H: usize = 600;
+const W: usize = 450;
+const H: usize = 780;
 
 var framebuffer: [W * H]u32 = undefined;
 
 // ---------------- tunables ----------------
-const MAX_BOTS: usize = 1500;
-const START_BOTS: usize = 110;
+const MAX_BOTS: usize = 2400;
+const START_BOTS: usize = 150;
 
-const NODE_COUNT: usize = 8;
+const NODE_COUNT: usize = 12;
 const NODE_INF_R: f32 = 32; // infection radius around a node
 const NODE_DRAW_R: f32 = 13;
 
-const MAX_SENT: usize = 8;
+const MAX_SENT: usize = 14;
 const START_SENT: usize = 2;
 const SENT_SPEED: f32 = 92; // slightly slower than bots: you can kite them
 const SENT_KILL_R: f32 = 18;
@@ -38,11 +38,18 @@ const W_FLEE: f32 = 1.5;
 
 // spatial hash grid (cell == VIEW_R) so flocking neighbor lookups are ~O(n)
 const GCELL: f32 = 30.0;
-const GW: usize = 12; // ceil(W / GCELL)
-const GH: usize = 20; // ceil(H / GCELL)
+const GW: usize = 15; // W / GCELL
+const GH: usize = 26; // H / GCELL
 const NCELLS: usize = GW * GH;
 const GWi: i32 = @intCast(GW);
 const GHi: i32 = @intCast(GH);
+
+// maze walls
+const MAX_WALLS: usize = 16;
+const WALL_MARGIN: f32 = 13; // repulsion onset distance from a wall
+
+// HEAT: rises with takeover; ramps sentinel pressure for a real endgame
+var heat: f32 = 0;
 
 const INF_CAP: f32 = 26; // bots beyond this don't speed infection further
 const INF_GAIN: f32 = 1.15; // per second at full cap
@@ -103,6 +110,8 @@ const COL_CLEAN = rgb(70, 120, 150);
 const COL_CONTEST = rgb(255, 190, 70);
 const COL_OWNED = rgb(60, 255, 110);
 const COL_SENT = rgb(255, 60, 70);
+const COL_WALL = rgb(24, 44, 40);
+const COL_WALL_EDGE = rgb(46, 92, 78);
 
 // ---------------- math ----------------
 inline fn clampf(v: f32, lo: f32, hi: f32) f32 {
@@ -246,6 +255,13 @@ const Particle = struct { x: f32, y: f32, vx: f32, vy: f32, life: f32, max: f32,
 var parts: [MAX_PART]Particle = undefined;
 var part_count: usize = 0;
 
+// maze walls (axis-aligned rects): x0,y0,x1,y1
+var wall_x0: [MAX_WALLS]f32 = undefined;
+var wall_y0: [MAX_WALLS]f32 = undefined;
+var wall_x1: [MAX_WALLS]f32 = undefined;
+var wall_y1: [MAX_WALLS]f32 = undefined;
+var wall_count: usize = 0;
+
 const State = enum(i32) { ready = 0, playing = 1, won = 2, lost = 3 };
 var state: State = .ready;
 
@@ -304,19 +320,162 @@ fn pulse(t: f32) f32 {
     return if (f < 0.5) f * 2 else (1 - f) * 2;
 }
 
+// ---------------- walls (maze) ----------------
+fn pushWall(x0: f32, y0: f32, x1: f32, y1: f32) void {
+    if (wall_count >= MAX_WALLS) return;
+    wall_x0[wall_count] = x0;
+    wall_y0[wall_count] = y0;
+    wall_x1[wall_count] = x1;
+    wall_y1[wall_count] = y1;
+    wall_count += 1;
+}
+
+fn buildWalls() void {
+    wall_count = 0;
+    // Coarse room grid; carve dividers with a random opening per line so the
+    // field reads as a maze but stays connected and flockable.
+    const cols: usize = 2;
+    const rows: usize = 3;
+    const ix0: f32 = 34;
+    const ix1: f32 = W - 34;
+    const iy0: f32 = 118;
+    const iy1: f32 = H - 150;
+    const cw = (ix1 - ix0) / @as(f32, cols);
+    const ch = (iy1 - iy0) / @as(f32, rows);
+    const t: f32 = 5; // half-thickness
+
+    // horizontal dividers (between rows), each missing one column segment
+    var r: usize = 1;
+    while (r < rows) : (r += 1) {
+        const yy = iy0 + ch * @as(f32, @floatFromInt(r));
+        const gap = rnd() % cols;
+        var c: usize = 0;
+        while (c < cols) : (c += 1) {
+            if (c == gap) continue;
+            const wx0 = ix0 + cw * @as(f32, @floatFromInt(c)) + 8;
+            const wx1 = ix0 + cw * @as(f32, @floatFromInt(c + 1)) - 8;
+            pushWall(wx0, yy - t, wx1, yy + t);
+        }
+    }
+    // vertical dividers (between cols), each missing one row segment
+    var c2: usize = 1;
+    while (c2 < cols) : (c2 += 1) {
+        const xx = ix0 + cw * @as(f32, @floatFromInt(c2));
+        const gap = rnd() % rows;
+        var rr: usize = 0;
+        while (rr < rows) : (rr += 1) {
+            if (rr == gap) continue;
+            const wy0 = iy0 + ch * @as(f32, @floatFromInt(rr)) + 8;
+            const wy1 = iy0 + ch * @as(f32, @floatFromInt(rr + 1)) - 8;
+            pushWall(xx - t, wy0, xx + t, wy1);
+        }
+    }
+}
+
+fn nearAnyWall(x: f32, y: f32, pad: f32) bool {
+    var w: usize = 0;
+    while (w < wall_count) : (w += 1) {
+        if (x > wall_x0[w] - pad and x < wall_x1[w] + pad and
+            y > wall_y0[w] - pad and y < wall_y1[w] + pad) return true;
+    }
+    return false;
+}
+
+fn wallForce(x: f32, y: f32, ax: *f32, ay: *f32) void {
+    var w: usize = 0;
+    while (w < wall_count) : (w += 1) {
+        const rx0 = wall_x0[w];
+        const ry0 = wall_y0[w];
+        const rx1 = wall_x1[w];
+        const ry1 = wall_y1[w];
+        if (x > rx0 and x < rx1 and y > ry0 and y < ry1) {
+            // inside: shove out the nearest face
+            const dl = x - rx0;
+            const dr = rx1 - x;
+            const dtp = y - ry0;
+            const db = ry1 - y;
+            var nx: f32 = -1;
+            var ny: f32 = 0;
+            var md = dl;
+            if (dr < md) {
+                md = dr;
+                nx = 1;
+                ny = 0;
+            }
+            if (dtp < md) {
+                md = dtp;
+                nx = 0;
+                ny = -1;
+            }
+            if (db < md) {
+                md = db;
+                nx = 0;
+                ny = 1;
+            }
+            ax.* += nx * BOT_FORCE * 2.4;
+            ay.* += ny * BOT_FORCE * 2.4;
+        } else {
+            const cxp = clampf(x, rx0, rx1);
+            const cyp = clampf(y, ry0, ry1);
+            const dx = x - cxp;
+            const dy = y - cyp;
+            const d2 = dx * dx + dy * dy;
+            if (d2 < WALL_MARGIN * WALL_MARGIN and d2 > 0.0001) {
+                const dd = @sqrt(d2);
+                const f = 1.0 - dd / WALL_MARGIN;
+                ax.* += (dx / dd) * f * BOT_FORCE * 1.7;
+                ay.* += (dy / dd) * f * BOT_FORCE * 1.7;
+            }
+        }
+    }
+}
+
+fn resolveWalls(x: *f32, y: *f32) void {
+    var w: usize = 0;
+    while (w < wall_count) : (w += 1) {
+        if (x.* > wall_x0[w] and x.* < wall_x1[w] and y.* > wall_y0[w] and y.* < wall_y1[w]) {
+            const dl = x.* - wall_x0[w];
+            const dr = wall_x1[w] - x.*;
+            const dtp = y.* - wall_y0[w];
+            const db = wall_y1[w] - y.*;
+            var md = dl;
+            var ex = wall_x0[w] - 0.5;
+            var ey = y.*;
+            if (dr < md) {
+                md = dr;
+                ex = wall_x1[w] + 0.5;
+                ey = y.*;
+            }
+            if (dtp < md) {
+                md = dtp;
+                ex = x.*;
+                ey = wall_y0[w] - 0.5;
+            }
+            if (db < md) {
+                md = db;
+                ex = x.*;
+                ey = wall_y1[w] + 0.5;
+            }
+            x.* = ex;
+            y.* = ey;
+        }
+    }
+}
+
 // ---------------- setup ----------------
 fn placeNodes() void {
     node_x[0] = W / 2;
     node_y[0] = H - 110;
     var placed: usize = 1;
     var tries: usize = 0;
-    while (placed < NODE_COUNT and tries < 4000) : (tries += 1) {
+    while (placed < NODE_COUNT and tries < 6000) : (tries += 1) {
         const x = rndRange(42, W - 42);
-        const y = rndRange(86, H - 150);
+        const y = rndRange(96, H - 160);
+        if (nearAnyWall(x, y, 22)) continue;
         var ok = true;
         var j: usize = 0;
         while (j < placed) : (j += 1) {
-            if (dist2(x, y, node_x[j], node_y[j]) < 76 * 76) {
+            if (dist2(x, y, node_x[j], node_y[j]) < 70 * 70) {
                 ok = false;
                 break;
             }
@@ -329,7 +488,7 @@ fn placeNodes() void {
     }
     while (placed < NODE_COUNT) : (placed += 1) {
         node_x[placed] = rndRange(42, W - 42);
-        node_y[placed] = rndRange(86, H - 150);
+        node_y[placed] = rndRange(96, H - 160);
     }
     var i: usize = 0;
     while (i < NODE_COUNT) : (i += 1) {
@@ -413,6 +572,7 @@ fn spawnSentinel() void {
 
 export fn init(seed: u32) void {
     rng_state = seed | 1;
+    clear(COL_BG);
     bot_count = 0;
     sent_count = 0;
     part_count = 0;
@@ -423,7 +583,9 @@ export fn init(seed: u32) void {
     key_dy = 0;
     anim_t = 0;
     collapse_t = 0;
+    heat = 0;
 
+    buildWalls();
     placeNodes();
     buildLinks();
 
@@ -552,19 +714,22 @@ fn stepBots(dt: f32) void {
             }
         }
 
-        // soft walls
+        // soft walls (field edges)
         if (bot_x[i] < 10) ax += (10 - bot_x[i]) * 30;
         if (bot_x[i] > W - 10) ax += ((W - 10) - bot_x[i]) * 30;
         if (bot_y[i] < 74) ay += (74 - bot_y[i]) * 30;
         if (bot_y[i] > H - 6) ay += ((H - 6) - bot_y[i]) * 30;
 
-        // clamp force
+        // clamp steering force (before wall force, so walls always win)
         const fmag = @sqrt(ax * ax + ay * ay);
         if (fmag > BOT_FORCE) {
             const k = BOT_FORCE / fmag;
             ax *= k;
             ay *= k;
         }
+
+        // maze walls (added after the clamp; bots must never pass through)
+        wallForce(bot_x[i], bot_y[i], &ax, &ay);
 
         bot_vx[i] += ax * dt;
         bot_vy[i] += ay * dt;
@@ -578,6 +743,7 @@ fn stepBots(dt: f32) void {
         bot_y[i] += bot_vy[i] * dt;
         bot_x[i] = clampf(bot_x[i], 3, W - 3);
         bot_y[i] = clampf(bot_y[i], 72, H - 3);
+        resolveWalls(&bot_x[i], &bot_y[i]);
     }
 }
 
@@ -637,11 +803,22 @@ fn stepNodes(dt: f32) void {
 }
 
 fn stepSentinels(dt: f32) void {
-    const desired = START_SENT + (ownedCount() -| 1);
+    // HEAT rises with takeover; eases toward target so it ramps smoothly.
+    const owned = ownedCount();
+    const target_heat = @as(f32, @floatFromInt(owned)) / @as(f32, NODE_COUNT);
+    heat += (target_heat - heat) * clampf(dt * 0.8, 0, 1);
+
+    // more sentinels, faster and deadlier, as heat climbs
+    const extra: usize = @intFromFloat(heat * @as(f32, MAX_SENT - START_SENT));
+    const desired = @min(START_SENT + (owned -| 1) + extra, MAX_SENT);
+    const spd = SENT_SPEED * (1.0 + heat * 0.35);
+    const kill_cd = SENT_KILL_CD * (1.0 - heat * 0.4); // up to 40% faster kills
+    const kill_n: usize = SENT_KILL_N + @as(usize, @intFromFloat(heat * 2.0));
+
     sent_spawn_t -= dt;
     if (sent_count < desired and sent_count < MAX_SENT and sent_spawn_t <= 0) {
         spawnSentinel();
-        sent_spawn_t = 0.9;
+        sent_spawn_t = 0.7;
     }
 
     var cx: f32 = 0;
@@ -674,25 +851,30 @@ fn stepSentinels(dt: f32) void {
             dx /= d;
             dy /= d;
         }
-        sent_vx[s] = dx * SENT_SPEED + rndRange(-8, 8);
-        sent_vy[s] = dy * SENT_SPEED + rndRange(-8, 8);
+        var ax = dx * spd;
+        var ay = dy * spd;
+        // steer around walls
+        wallForce(sent_x[s], sent_y[s], &ax, &ay);
+        sent_vx[s] = ax + rndRange(-8, 8);
+        sent_vy[s] = ay + rndRange(-8, 8);
         sent_x[s] += sent_vx[s] * dt;
         sent_y[s] += sent_vy[s] * dt;
         sent_x[s] = clampf(sent_x[s], 4, W - 4);
         sent_y[s] = clampf(sent_y[s], 74, H - 4);
+        resolveWalls(&sent_x[s], &sent_y[s]);
 
         if (sent_kcd[s] > 0) sent_kcd[s] -= dt;
         if (surge_t <= 0 and sent_kcd[s] <= 0) {
             var killed: usize = 0;
             var b: usize = 0;
-            while (b < bot_count and killed < SENT_KILL_N) {
+            while (b < bot_count and killed < kill_n) {
                 if (dist2(bot_x[b], bot_y[b], sent_x[s], sent_y[s]) < SENT_KILL_R * SENT_KILL_R) {
                     burst(bot_x[b], bot_y[b], 5, 90, COL_SENT);
                     killBot(b);
                     killed += 1;
                 } else b += 1;
             }
-            if (killed > 0) sent_kcd[s] = SENT_KILL_CD;
+            if (killed > 0) sent_kcd[s] = kill_cd;
         }
     }
 }
@@ -760,13 +942,67 @@ export fn update(dt_in: f32) void {
 }
 
 // ---------------- render ----------------
+// Decay the whole framebuffer toward black each frame -> moving things leave
+// short trails. Single shift+mask per pixel (bg is near-black, so this is
+// visually identical to fading toward COL_BG but ~3x cheaper).
+fn fadeBuffer() void {
+    var i: usize = 0;
+    while (i < W * H) : (i += 1) {
+        const p = framebuffer[i];
+        framebuffer[i] = 0xFF000000 | ((p >> 1) & 0x007F7F7F);
+    }
+}
+fn addPx(x: i32, y: i32, r: u32, g: u32, b: u32) void {
+    if (x < 0 or y < 0 or x >= @as(i32, W) or y >= @as(i32, H)) return;
+    const idx = @as(usize, @intCast(y)) * W + @as(usize, @intCast(x));
+    const p = framebuffer[idx];
+    var pr = (p & 0xFF) + r;
+    if (pr > 255) pr = 255;
+    var pg = ((p >> 8) & 0xFF) + g;
+    if (pg > 255) pg = 255;
+    var pb = ((p >> 16) & 0xFF) + b;
+    if (pb > 255) pb = 255;
+    framebuffer[idx] = 0xFF000000 | (pb << 16) | (pg << 8) | pr;
+}
+// soft additive disk (quadratic falloff) -> subtle bloom around bright objects
+fn glow(cx: f32, cy: f32, r: f32, cr: u32, cg: u32, cb: u32, intensity: f32) void {
+    const r2 = r * r;
+    var y = @as(i32, @intFromFloat(@floor(cy - r)));
+    const ymax = @as(i32, @intFromFloat(@floor(cy + r)));
+    const fcr = @as(f32, @floatFromInt(cr));
+    const fcg = @as(f32, @floatFromInt(cg));
+    const fcb = @as(f32, @floatFromInt(cb));
+    while (y <= ymax) : (y += 1) {
+        var x = @as(i32, @intFromFloat(@floor(cx - r)));
+        const xmax = @as(i32, @intFromFloat(@floor(cx + r)));
+        while (x <= xmax) : (x += 1) {
+            const dx = @as(f32, @floatFromInt(x)) + 0.5 - cx;
+            const dy = @as(f32, @floatFromInt(y)) + 0.5 - cy;
+            const dd = dx * dx + dy * dy;
+            if (dd <= r2) {
+                const f = 1.0 - dd / r2;
+                const k = f * f * intensity;
+                addPx(x, y, @intFromFloat(fcr * k), @intFromFloat(fcg * k), @intFromFloat(fcb * k));
+            }
+        }
+    }
+}
+
 fn render() void {
-    clear(COL_BG);
+    fadeBuffer();
 
     var gx: f32 = 0;
     while (gx < W) : (gx += 30) fillRect(gx, 72, 1, H - 72, COL_GRID);
     var gy: f32 = 72;
     while (gy < H) : (gy += 30) fillRect(0, gy, W, 1, COL_GRID);
+
+    // maze walls
+    var wi: usize = 0;
+    while (wi < wall_count) : (wi += 1) {
+        fillRect(wall_x0[wi], wall_y0[wi], wall_x1[wi] - wall_x0[wi], wall_y1[wi] - wall_y0[wi], COL_WALL);
+        fillRect(wall_x0[wi], wall_y0[wi], wall_x1[wi] - wall_x0[wi], 1, COL_WALL_EDGE);
+        fillRect(wall_x0[wi], wall_y1[wi] - 1, wall_x1[wi] - wall_x0[wi], 1, COL_WALL_EDGE);
+    }
 
     var l: usize = 0;
     while (l < link_count) : (l += 1) {
@@ -839,6 +1075,30 @@ fn render() void {
         circleOutline(target_x, target_y, 6 + 2 * pulse(anim_t * 4), scaleColor(COL_BOT, 0.7));
         plot(@intFromFloat(target_x), @intFromFloat(target_y), COL_BOT);
     }
+
+    // ---- subtle bloom: additive halos on the bright objects ----
+    var cx: f32 = 0;
+    var cy: f32 = 0;
+    centroid(&cx, &cy);
+    if (bot_count > 0) {
+        const gr = 28.0 + @sqrt(@as(f32, @floatFromInt(bot_count))) * 1.4;
+        glow(cx, cy, gr, 8, 36, 18, 0.7);
+    }
+    i = 0;
+    while (i < NODE_COUNT) : (i += 1) {
+        if (node_owned[i]) {
+            glow(node_x[i], node_y[i], 24, 14, 60, 26, 0.6);
+        } else if (node_inf[i] > 0.05) {
+            glow(node_x[i], node_y[i], 18, 60, 44, 12, 0.5);
+        }
+    }
+    s = 0;
+    while (s < sent_count) : (s += 1) {
+        glow(sent_x[s], sent_y[s], 20, 70, 14, 16, 0.55);
+    }
+    if (surge_t > 0) {
+        glow(cx, cy, 42, 50, 70, 60, 0.45);
+    }
 }
 
 // ---------------- exports ----------------
@@ -869,6 +1129,9 @@ export fn getTakeover() i32 {
 export fn getSurge() f32 {
     if (surge_cd <= 0) return 1.0;
     return clampf(1.0 - surge_cd / SURGE_CD, 0, 1);
+}
+export fn getHeat() f32 {
+    return clampf(heat, 0, 1);
 }
 export fn getNodeX(i: i32) f32 {
     const u: usize = @intCast(i);
