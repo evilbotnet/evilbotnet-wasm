@@ -14,7 +14,8 @@ var framebuffer: [W * H]u32 = undefined;
 const MAX_BOTS: usize = 2400;
 const START_BOTS: usize = 150;
 
-const NODE_COUNT: usize = 12;
+const MAX_NODES: usize = 14; // array capacity
+var node_count: usize = 8; // active nodes this level (set per level)
 const NODE_INF_R: f32 = 32; // infection radius around a node
 const NODE_DRAW_R: f32 = 13;
 
@@ -75,6 +76,19 @@ const CLOAK_CD: f32 = 11.0;
 
 // background parallax motes
 const MOTE_COUNT: usize = 54;
+
+// ---- per-level / per-run config (set by JS before init) ----
+var cfg_start_sent: usize = 2;
+var cfg_sent_cap: usize = MAX_SENT;
+var cfg_walls: i32 = 1; // wall-density level (0 = none)
+var cfg_swarm_cap: usize = 1500; // effective bot cap (<= MAX_BOTS)
+var cfg_start_bots: usize = 150;
+var cfg_infect: f32 = 1.0; // infection-rate multiplier
+var cfg_botspeed: f32 = 1.0; // bot-speed multiplier
+var cfg_cooldown: f32 = 1.0; // ability-cooldown multiplier
+var unlock_emp: bool = false;
+var unlock_fork: bool = false;
+var unlock_cloak: bool = false;
 
 const COLLAPSE_N: usize = 8; // held below this many bots...
 const COLLAPSE_T: f32 = 4.0; // ...for this long = botnet dismantled (loss)
@@ -244,12 +258,12 @@ var bot_count: usize = 0;
 var cell_head: [NCELLS]i32 = undefined;
 var bot_next: [MAX_BOTS]i32 = undefined;
 
-var node_x: [NODE_COUNT]f32 = undefined;
-var node_y: [NODE_COUNT]f32 = undefined;
-var node_inf: [NODE_COUNT]f32 = undefined;
-var node_owned: [NODE_COUNT]bool = undefined;
-var node_spawn_t: [NODE_COUNT]f32 = undefined;
-var node_pulse: [NODE_COUNT]f32 = undefined;
+var node_x: [MAX_NODES]f32 = undefined;
+var node_y: [MAX_NODES]f32 = undefined;
+var node_inf: [MAX_NODES]f32 = undefined;
+var node_owned: [MAX_NODES]bool = undefined;
+var node_spawn_t: [MAX_NODES]f32 = undefined;
+var node_pulse: [MAX_NODES]f32 = undefined;
 
 var link_a: [MAX_LINKS]usize = undefined;
 var link_b: [MAX_LINKS]usize = undefined;
@@ -313,7 +327,7 @@ var shake_mag: f32 = 0;
 
 // ---------------- helpers ----------------
 fn addBot(x: f32, y: f32) void {
-    if (bot_count >= MAX_BOTS) return;
+    if (bot_count >= cfg_swarm_cap or bot_count >= MAX_BOTS) return;
     bot_x[bot_count] = x;
     bot_y[bot_count] = y;
     bot_vx[bot_count] = rndRange(-20, 20);
@@ -341,7 +355,7 @@ fn burst(x: f32, y: f32, n: usize, spd: f32, c: u32) void {
 fn ownedCount() usize {
     var n: usize = 0;
     var i: usize = 0;
-    while (i < NODE_COUNT) : (i += 1) {
+    while (i < node_count) : (i += 1) {
         if (node_owned[i]) n += 1;
     }
     return n;
@@ -367,16 +381,19 @@ fn pushWall(x0: f32, y0: f32, x1: f32, y1: f32) void {
 
 fn buildWalls() void {
     wall_count = 0;
+    if (cfg_walls <= 0) return; // early levels: open field
+
     // Coarse room grid; carve dividers with a random opening per line so the
-    // field reads as a maze but stays connected and flockable.
-    const cols: usize = 2;
-    const rows: usize = 3;
+    // field reads as a maze but stays connected and flockable. Density grows
+    // with cfg_walls.
+    const cols: usize = if (cfg_walls >= 3) 3 else 2;
+    const rows: usize = 2 + @as(usize, @intCast(@min(cfg_walls, 2)));
     const ix0: f32 = 34;
     const ix1: f32 = W - 34;
     const iy0: f32 = 118;
     const iy1: f32 = H - 150;
-    const cw = (ix1 - ix0) / @as(f32, cols);
-    const ch = (iy1 - iy0) / @as(f32, rows);
+    const cw = (ix1 - ix0) / @as(f32, @floatFromInt(cols));
+    const ch = (iy1 - iy0) / @as(f32, @floatFromInt(rows));
     const t: f32 = 5; // half-thickness
 
     // horizontal dividers (between rows), each missing one column segment
@@ -406,11 +423,12 @@ fn buildWalls() void {
         }
     }
 
-    // a few solid block obstacles for cover / sentinel-luring chokepoints
+    // a couple of block obstacles only at higher densities
+    const blocks: usize = if (cfg_walls >= 4) 2 else if (cfg_walls >= 3) 1 else 0;
     var nb: usize = 0;
-    while (nb < 3 and wall_count < MAX_WALLS) : (nb += 1) {
-        const bw = rndRange(30, 52);
-        const bh = rndRange(26, 48);
+    while (nb < blocks and wall_count < MAX_WALLS) : (nb += 1) {
+        const bw = rndRange(30, 50);
+        const bh = rndRange(26, 46);
         const bx = rndRange(ix0 + 12, ix1 - bw - 12);
         const by = rndRange(iy0 + 12, iy1 - bh - 12);
         pushWall(bx, by, bx + bw, by + bh);
@@ -513,7 +531,7 @@ fn placeNodes() void {
     node_y[0] = H - 110;
     var placed: usize = 1;
     var tries: usize = 0;
-    while (placed < NODE_COUNT and tries < 6000) : (tries += 1) {
+    while (placed < node_count and tries < 6000) : (tries += 1) {
         const x = rndRange(42, W - 42);
         const y = rndRange(96, H - 160);
         if (nearAnyWall(x, y, 22)) continue;
@@ -531,12 +549,12 @@ fn placeNodes() void {
             placed += 1;
         }
     }
-    while (placed < NODE_COUNT) : (placed += 1) {
+    while (placed < node_count) : (placed += 1) {
         node_x[placed] = rndRange(42, W - 42);
         node_y[placed] = rndRange(96, H - 160);
     }
     var i: usize = 0;
-    while (i < NODE_COUNT) : (i += 1) {
+    while (i < node_count) : (i += 1) {
         node_inf[i] = 0;
         node_owned[i] = false;
         node_spawn_t[i] = 0;
@@ -547,7 +565,7 @@ fn placeNodes() void {
 }
 
 fn addLink(a: usize, b: usize) void {
-    if (b >= NODE_COUNT) return;
+    if (b >= node_count) return;
     var k: usize = 0;
     while (k < link_count) : (k += 1) {
         if ((link_a[k] == a and link_b[k] == b) or (link_a[k] == b and link_b[k] == a)) return;
@@ -560,13 +578,13 @@ fn addLink(a: usize, b: usize) void {
 fn buildLinks() void {
     link_count = 0;
     var i: usize = 0;
-    while (i < NODE_COUNT) : (i += 1) {
-        var n1: usize = NODE_COUNT;
-        var n2: usize = NODE_COUNT;
+    while (i < node_count) : (i += 1) {
+        var n1: usize = node_count;
+        var n2: usize = node_count;
         var d1: f32 = 1e30;
         var d2: f32 = 1e30;
         var j: usize = 0;
-        while (j < NODE_COUNT) : (j += 1) {
+        while (j < node_count) : (j += 1) {
             if (j == i) continue;
             const d = dist2(node_x[i], node_y[i], node_x[j], node_y[j]);
             if (d < d1) {
@@ -653,14 +671,14 @@ export fn init(seed: u32) void {
     buildLinks();
 
     var i: usize = 0;
-    while (i < START_BOTS) : (i += 1) {
+    while (i < cfg_start_bots) : (i += 1) {
         addBot(node_x[0] + rndRange(-18, 18), node_y[0] + rndRange(-18, 18));
     }
     target_x = node_x[0];
     target_y = node_y[0];
 
     i = 0;
-    while (i < START_SENT) : (i += 1) spawnSentinel();
+    while (i < cfg_start_sent) : (i += 1) spawnSentinel();
     sent_spawn_t = 0;
 
     state = .ready;
@@ -687,7 +705,8 @@ fn centroid(cx: *f32, cy: *f32) void {
 fn stepBots(dt: f32) void {
     const surging = surge_t > 0;
     const seek_w: f32 = if (surging) W_SEEK * 2.4 else W_SEEK;
-    const max_spd: f32 = if (surging) BOT_SPEED * 1.95 else BOT_SPEED;
+    const base_spd = BOT_SPEED * cfg_botspeed;
+    const max_spd: f32 = if (surging) base_spd * 1.95 else base_spd;
     const view2 = VIEW_R * VIEW_R;
     const sep2 = SEP_R * SEP_R;
 
@@ -812,7 +831,7 @@ fn stepBots(dt: f32) void {
 
 fn stepNodes(dt: f32) void {
     var i: usize = 0;
-    while (i < NODE_COUNT) : (i += 1) {
+    while (i < node_count) : (i += 1) {
         var near: f32 = 0;
         var b: usize = 0;
         while (b < bot_count) : (b += 1) {
@@ -830,7 +849,7 @@ fn stepNodes(dt: f32) void {
         const prev_owned = node_owned[i];
         if (near > 0) {
             const k = clampf(near / INF_CAP, 0, 1);
-            node_inf[i] += k * INF_GAIN * dt;
+            node_inf[i] += k * INF_GAIN * cfg_infect * dt;
         } else {
             node_inf[i] -= INF_DECAY * dt;
         }
@@ -869,12 +888,15 @@ fn stepNodes(dt: f32) void {
 fn stepSentinels(dt: f32) void {
     // HEAT rises with takeover; eases toward target so it ramps smoothly.
     const owned = ownedCount();
-    const target_heat = @as(f32, @floatFromInt(owned)) / @as(f32, NODE_COUNT);
+    const denom: f32 = if (node_count > 0) @floatFromInt(node_count) else 1.0;
+    const target_heat = @as(f32, @floatFromInt(owned)) / denom;
     heat += (target_heat - heat) * clampf(dt * 0.8, 0, 1);
 
-    // more sentinels, faster and deadlier, as heat climbs
-    const extra: usize = @intFromFloat(heat * @as(f32, MAX_SENT - START_SENT));
-    const desired = @min(START_SENT + (owned -| 1) + extra, MAX_SENT);
+    // more sentinels, faster and deadlier, as heat climbs (capped per level)
+    const cap = @min(cfg_sent_cap, MAX_SENT);
+    const span: usize = if (cap > cfg_start_sent) cap - cfg_start_sent else 0;
+    const extra: usize = @intFromFloat(heat * @as(f32, @floatFromInt(span)));
+    const desired = @min(cfg_start_sent + (owned -| 1) + extra, cap);
     const spd = SENT_SPEED * (1.0 + heat * 0.35);
     const kill_cd = SENT_KILL_CD * (1.0 - heat * 0.4); // up to 40% faster kills
     const kill_n: usize = SENT_KILL_N + @as(usize, @intFromFloat(heat * 2.0));
@@ -908,7 +930,7 @@ fn stepSentinels(dt: f32) void {
             ty = cy;
             var best: f32 = 1e30;
             var i: usize = 0;
-            while (i < NODE_COUNT) : (i += 1) {
+            while (i < node_count) : (i += 1) {
                 const active = (node_inf[i] > 0.12 and node_inf[i] < 1.0) or (node_owned[i] and i != 0);
                 if (active) {
                     const d = dist2(sent_x[s], sent_y[s], node_x[i], node_y[i]);
@@ -993,7 +1015,7 @@ fn stepParticles(dt: f32) void {
 
 fn allOwned() bool {
     var i: usize = 0;
-    while (i < NODE_COUNT) : (i += 1) {
+    while (i < node_count) : (i += 1) {
         if (!node_owned[i]) return false;
     }
     return true;
@@ -1145,7 +1167,7 @@ fn render() void {
     }
 
     var i: usize = 0;
-    while (i < NODE_COUNT) : (i += 1) {
+    while (i < node_count) : (i += 1) {
         const inf = node_inf[i];
         var ring = COL_CLEAN;
         if (node_owned[i]) {
@@ -1232,7 +1254,7 @@ fn render() void {
         glow(cx, cy, gr, 8, 36, 18, 0.7);
     }
     i = 0;
-    while (i < NODE_COUNT) : (i += 1) {
+    while (i < node_count) : (i += 1) {
         if (node_owned[i]) {
             glow(node_x[i], node_y[i], 24, 14, 60, 26, 0.6);
         } else if (node_inf[i] > 0.05) {
@@ -1272,10 +1294,10 @@ export fn getNodesOwned() i32 {
     return @intCast(ownedCount());
 }
 export fn getNodesTotal() i32 {
-    return @as(i32, NODE_COUNT);
+    return @intCast(node_count);
 }
 export fn getTakeover() i32 {
-    return @intCast((ownedCount() * 100) / NODE_COUNT);
+    return @intCast((ownedCount() * 100) / node_count);
 }
 export fn getSurge() f32 {
     if (surge_cd <= 0) return 1.0;
@@ -1301,8 +1323,8 @@ export fn getCloak() f32 {
     return ready01(cloak_cd, CLOAK_CD);
 }
 export fn abEmp() void {
-    if (state != .playing or emp_cd > 0) return;
-    emp_cd = EMP_CD;
+    if (state != .playing or !unlock_emp or emp_cd > 0) return;
+    emp_cd = EMP_CD * cfg_cooldown;
     var cx: f32 = 0;
     var cy: f32 = 0;
     centroid(&cx, &cy);
@@ -1316,8 +1338,8 @@ export fn abEmp() void {
     }
 }
 export fn abFork() void {
-    if (state != .playing or fork_cd > 0) return;
-    fork_cd = FORK_CD;
+    if (state != .playing or !unlock_fork or fork_cd > 0) return;
+    fork_cd = FORK_CD * cfg_cooldown;
     var cx: f32 = 0;
     var cy: f32 = 0;
     centroid(&cx, &cy);
@@ -1327,21 +1349,66 @@ export fn abFork() void {
     while (k < FORK_N) : (k += 1) addBot(cx + rndRange(-22, 22), cy + rndRange(-22, 22));
 }
 export fn abCloak() void {
-    if (state != .playing or cloak_cd > 0) return;
-    cloak_cd = CLOAK_CD;
+    if (state != .playing or !unlock_cloak or cloak_cd > 0) return;
+    cloak_cd = CLOAK_CD * cfg_cooldown;
     cloak_t = CLOAK_DUR;
+}
+
+// ---- per-level config setters (JS calls these before init) ----
+fn clampUsize(n: i32, lo: usize, hi: usize) usize {
+    if (n < 0) return lo;
+    var u: usize = @intCast(n);
+    if (u < lo) u = lo;
+    if (u > hi) u = hi;
+    return u;
+}
+export fn setNodes(n: i32) void {
+    node_count = clampUsize(n, 1, MAX_NODES);
+}
+export fn setStartSent(n: i32) void {
+    cfg_start_sent = clampUsize(n, 0, MAX_SENT);
+}
+export fn setSentCap(n: i32) void {
+    cfg_sent_cap = clampUsize(n, 1, MAX_SENT);
+}
+export fn setWalls(n: i32) void {
+    cfg_walls = n;
+}
+export fn setSwarmCap(n: i32) void {
+    cfg_swarm_cap = clampUsize(n, 50, MAX_BOTS);
+}
+export fn setStartBots(n: i32) void {
+    cfg_start_bots = clampUsize(n, 1, MAX_BOTS);
+}
+export fn setInfect(f: f32) void {
+    cfg_infect = clampf(f, 0.2, 4.0);
+}
+export fn setBotSpeed(f: f32) void {
+    cfg_botspeed = clampf(f, 0.5, 3.0);
+}
+export fn setCooldown(f: f32) void {
+    cfg_cooldown = clampf(f, 0.2, 1.5);
+}
+export fn setUnlock(id: i32, on: i32) void {
+    const v = on != 0;
+    switch (id) {
+        1 => unlock_emp = v,
+        2 => unlock_fork = v,
+        3 => unlock_cloak = v,
+        else => {},
+    }
 }
 export fn getNodeX(i: i32) f32 {
     const u: usize = @intCast(i);
-    return if (u < NODE_COUNT) node_x[u] else -1;
+    return if (u < node_count) node_x[u] else -1;
 }
 export fn getNodeY(i: i32) f32 {
     const u: usize = @intCast(i);
-    return if (u < NODE_COUNT) node_y[u] else -1;
+    return if (u < node_count) node_y[u] else -1;
 }
 export fn getNodeOwnedI(i: i32) i32 {
     const u: usize = @intCast(i);
-    return if (u < NODE_COUNT and node_owned[u]) 1 else 0;
+    return if (u < node_count and node_owned[u]) 1 else 0;
 }
 
 export fn pointerMove(nx: f32, ny: f32) void {
@@ -1360,7 +1427,7 @@ export fn press() void {
         .playing => {
             if (surge_cd <= 0) {
                 surge_t = SURGE_DUR;
-                surge_cd = SURGE_CD;
+                surge_cd = SURGE_CD * cfg_cooldown;
                 var cx: f32 = 0;
                 var cy: f32 = 0;
                 centroid(&cx, &cy);

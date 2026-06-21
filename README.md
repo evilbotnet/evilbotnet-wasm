@@ -21,7 +21,7 @@ your swarm or scrub your nodes back to clean.
 Lead sentinels into the maze walls and block obstacles — they snag briefly, which
 buys you time (they always free themselves, so it never clogs).
 
-**Win:** take the whole network (12 nodes). Every capture raises **HEAT** — sentinels get faster, more numerous, and deadlier, so the endgame bites. **Lose:** let EDR dismantle the swarm.
+**Roguelite runs:** each level is a network raid. Level 1 starts tiny (3 nodes, one sentinel, open field); clear every node and you **draft one of three upgrades** — bigger swarm, faster spread, overclocked bots, shorter cooldowns, or **unlock a new ability** (EMP / FORK / CLOAK). Then the next level escalates: more nodes, more sentinels, rising **HEAT**, and eventually maze walls. Lose your swarm and the run ends — how many levels can you clear? (Best level persists locally.)
 
 Captures are sticky (ownership hysteresis), so you can push outward — but leave a
 node undefended too long and a sentinel will grind it back.
