@@ -12,8 +12,14 @@ your swarm or scrub your nodes back to clean.
 ## Play
 
 - **Finger / mouse** — lead the rally point; the swarm flocks toward it.
-- **SURGE button / Space** — 1 s of speed + immunity to deletion (4.5 s cooldown). This is the skill: surge through sentinel walls and escape when cornered.
+- **SURGE** (Space) — 1.2 s of speed + immunity. Punch a capture through a defended node.
+- **EMP** (Q) — freeze nearby sentinels solid for a couple seconds.
+- **FORK** (F) — instantly mass a burst of new bots at the swarm.
+- **CLOAK** (C) — the EDR loses sight of your swarm; sneak a capture.
 - **WASD / arrows** — nudge the rally point (desktop).
+
+Lead sentinels into the maze walls and block obstacles — they snag briefly, which
+buys you time (they always free themselves, so it never clogs).
 
 **Win:** take the whole network (12 nodes). Every capture raises **HEAT** — sentinels get faster, more numerous, and deadlier, so the endgame bites. **Lose:** let EDR dismantle the swarm.
 

@@ -64,6 +64,18 @@ const OWN_SPAWN_N: usize = 5;
 const SURGE_DUR: f32 = 1.2;
 const SURGE_CD: f32 = 4.0;
 
+// abilities
+const EMP_R: f32 = 160; // sentinels within this of the swarm centroid get stunned
+const EMP_DUR: f32 = 2.4; // stun seconds
+const EMP_CD: f32 = 9.0;
+const FORK_N: usize = 180; // bots spawned by a fork
+const FORK_CD: f32 = 13.0;
+const CLOAK_DUR: f32 = 3.2; // sentinels lose the swarm
+const CLOAK_CD: f32 = 11.0;
+
+// background parallax motes
+const MOTE_COUNT: usize = 54;
+
 const COLLAPSE_N: usize = 8; // held below this many bots...
 const COLLAPSE_T: f32 = 4.0; // ...for this long = botnet dismantled (loss)
 
@@ -248,6 +260,8 @@ var sent_y: [MAX_SENT]f32 = undefined;
 var sent_vx: [MAX_SENT]f32 = undefined;
 var sent_vy: [MAX_SENT]f32 = undefined;
 var sent_kcd: [MAX_SENT]f32 = undefined;
+var sent_stun: [MAX_SENT]f32 = undefined; // EMP freeze remaining
+var sent_stuck: [MAX_SENT]f32 = undefined; // time spent wedged on a wall
 var sent_count: usize = 0;
 var sent_spawn_t: f32 = 0;
 
@@ -278,6 +292,24 @@ var surge_ring_y: f32 = 0;
 
 var anim_t: f32 = 0;
 var collapse_t: f32 = 0;
+
+// abilities
+var emp_cd: f32 = 0;
+var fork_cd: f32 = 0;
+var cloak_cd: f32 = 0;
+var cloak_t: f32 = 0; // active cloak remaining
+var emp_ring_t: f32 = -1;
+var emp_ring_x: f32 = 0;
+var emp_ring_y: f32 = 0;
+
+// background parallax motes
+var mote_x: [MOTE_COUNT]f32 = undefined;
+var mote_y: [MOTE_COUNT]f32 = undefined;
+var mote_v: [MOTE_COUNT]f32 = undefined;
+var mote_b: [MOTE_COUNT]f32 = undefined; // brightness/depth
+
+// screen shake (read by JS)
+var shake_mag: f32 = 0;
 
 // ---------------- helpers ----------------
 fn addBot(x: f32, y: f32) void {
@@ -313,6 +345,9 @@ fn ownedCount() usize {
         if (node_owned[i]) n += 1;
     }
     return n;
+}
+fn addShake(m: f32) void {
+    if (m > shake_mag) shake_mag = m;
 }
 // triangle wave 0..1, no trig
 fn pulse(t: f32) f32 {
@@ -369,6 +404,16 @@ fn buildWalls() void {
             const wy1 = iy0 + ch * @as(f32, @floatFromInt(rr + 1)) - 8;
             pushWall(xx - t, wy0, xx + t, wy1);
         }
+    }
+
+    // a few solid block obstacles for cover / sentinel-luring chokepoints
+    var nb: usize = 0;
+    while (nb < 3 and wall_count < MAX_WALLS) : (nb += 1) {
+        const bw = rndRange(30, 52);
+        const bh = rndRange(26, 48);
+        const bx = rndRange(ix0 + 12, ix1 - bw - 12);
+        const by = rndRange(iy0 + 12, iy1 - bh - 12);
+        pushWall(bx, by, bx + bw, by + bh);
     }
 }
 
@@ -567,6 +612,8 @@ fn spawnSentinel() void {
     sent_vx[sent_count] = 0;
     sent_vy[sent_count] = 0;
     sent_kcd[sent_count] = 0;
+    sent_stun[sent_count] = 0;
+    sent_stuck[sent_count] = 0;
     sent_count += 1;
 }
 
@@ -584,6 +631,22 @@ export fn init(seed: u32) void {
     anim_t = 0;
     collapse_t = 0;
     heat = 0;
+
+    emp_cd = 0;
+    fork_cd = 0;
+    cloak_cd = 0;
+    cloak_t = 0;
+    emp_ring_t = -1;
+    shake_mag = 0;
+
+    // background motes (parallax depth)
+    var m: usize = 0;
+    while (m < MOTE_COUNT) : (m += 1) {
+        mote_x[m] = rndRange(0, W);
+        mote_y[m] = rndRange(72, H);
+        mote_b[m] = rndRange(0.15, 0.6);
+        mote_v[m] = 4 + mote_b[m] * 14; // closer (brighter) drifts faster
+    }
 
     buildWalls();
     placeNodes();
@@ -785,6 +848,7 @@ fn stepNodes(dt: f32) void {
         if (node_owned[i] and !prev_owned) {
             node_pulse[i] = 0.5;
             burst(node_x[i], node_y[i], 26, 170, COL_OWNED);
+            addShake(5);
             var k: usize = 0;
             while (k < OWN_BONUS_BOTS) : (k += 1) addBot(node_x[i] + rndRange(-14, 14), node_y[i] + rndRange(-14, 14));
         } else if (!node_owned[i] and prev_owned) {
@@ -827,29 +891,42 @@ fn stepSentinels(dt: f32) void {
 
     var s: usize = 0;
     while (s < sent_count) : (s += 1) {
-        // head for the nearest node where the swarm is active; else hunt the swarm
-        var tx = cx;
-        var ty = cy;
-        var best: f32 = 1e30;
-        var i: usize = 0;
-        while (i < NODE_COUNT) : (i += 1) {
-            const active = (node_inf[i] > 0.12 and node_inf[i] < 1.0) or (node_owned[i] and i != 0);
-            if (active) {
-                const d = dist2(sent_x[s], sent_y[s], node_x[i], node_y[i]);
-                if (d < best) {
-                    best = d;
-                    tx = node_x[i];
-                    ty = node_y[i];
+        // EMP freeze: skip movement and kills entirely
+        if (sent_stun[s] > 0) {
+            sent_stun[s] -= dt;
+            continue;
+        }
+
+        const cloaked = cloak_t > 0;
+
+        // target: nearest active node; else hunt the swarm. While cloaked the
+        // EDR can't see the swarm, so it just mills in place.
+        var tx = sent_x[s];
+        var ty = sent_y[s];
+        if (!cloaked) {
+            tx = cx;
+            ty = cy;
+            var best: f32 = 1e30;
+            var i: usize = 0;
+            while (i < NODE_COUNT) : (i += 1) {
+                const active = (node_inf[i] > 0.12 and node_inf[i] < 1.0) or (node_owned[i] and i != 0);
+                if (active) {
+                    const d = dist2(sent_x[s], sent_y[s], node_x[i], node_y[i]);
+                    if (d < best) {
+                        best = d;
+                        tx = node_x[i];
+                        ty = node_y[i];
+                    }
                 }
             }
         }
 
         var dx = tx - sent_x[s];
         var dy = ty - sent_y[s];
-        const d = @sqrt(dx * dx + dy * dy);
-        if (d > 0.001) {
-            dx /= d;
-            dy /= d;
+        const dlen = @sqrt(dx * dx + dy * dy);
+        if (dlen > 0.001) {
+            dx /= dlen;
+            dy /= dlen;
         }
         var ax = dx * spd;
         var ay = dy * spd;
@@ -857,14 +934,32 @@ fn stepSentinels(dt: f32) void {
         wallForce(sent_x[s], sent_y[s], &ax, &ay);
         sent_vx[s] = ax + rndRange(-8, 8);
         sent_vy[s] = ay + rndRange(-8, 8);
+
+        const ox = sent_x[s];
+        const oy = sent_y[s];
         sent_x[s] += sent_vx[s] * dt;
         sent_y[s] += sent_vy[s] * dt;
         sent_x[s] = clampf(sent_x[s], 4, W - 4);
         sent_y[s] = clampf(sent_y[s], 74, H - 4);
         resolveWalls(&sent_x[s], &sent_y[s]);
 
+        // lure/unstick: a sentinel wedged against a wall snags briefly (a real
+        // tactic to shake pursuit) but kicks itself free so it never clogs.
+        const moved = dist2(sent_x[s], sent_y[s], ox, oy);
+        if (!cloaked and moved < 0.4) {
+            sent_stuck[s] += dt;
+            if (sent_stuck[s] > 0.7) {
+                sent_x[s] = clampf(sent_x[s] + rndRange(-16, 16), 4, W - 4);
+                sent_y[s] = clampf(sent_y[s] + rndRange(-16, 16), 74, H - 4);
+                resolveWalls(&sent_x[s], &sent_y[s]);
+                sent_stuck[s] = 0;
+            }
+        } else {
+            sent_stuck[s] = 0;
+        }
+
         if (sent_kcd[s] > 0) sent_kcd[s] -= dt;
-        if (surge_t <= 0 and sent_kcd[s] <= 0) {
+        if (surge_t <= 0 and !cloaked and sent_kcd[s] <= 0) {
             var killed: usize = 0;
             var b: usize = 0;
             while (b < bot_count and killed < kill_n) {
@@ -921,6 +1016,29 @@ export fn update(dt_in: f32) void {
         if (surge_ring_t > 0.5) surge_ring_t = -1;
     }
 
+    if (emp_cd > 0) emp_cd -= dt;
+    if (fork_cd > 0) fork_cd -= dt;
+    if (cloak_cd > 0) cloak_cd -= dt;
+    if (cloak_t > 0) cloak_t -= dt;
+    if (emp_ring_t >= 0) {
+        emp_ring_t += dt;
+        if (emp_ring_t > 0.55) emp_ring_t = -1;
+    }
+    if (shake_mag > 0) {
+        shake_mag -= dt * 22;
+        if (shake_mag < 0) shake_mag = 0;
+    }
+
+    // parallax motes drift down slowly and wrap
+    var m: usize = 0;
+    while (m < MOTE_COUNT) : (m += 1) {
+        mote_y[m] += mote_v[m] * dt;
+        if (mote_y[m] > H + 4) {
+            mote_y[m] = 70;
+            mote_x[m] = rndRange(0, W);
+        }
+    }
+
     if (state == .ready) {
         stepBots(dt);
     } else if (state == .playing) {
@@ -932,7 +1050,10 @@ export fn update(dt_in: f32) void {
         } else {
             collapse_t = 0;
         }
-        if (bot_count == 0 or collapse_t >= COLLAPSE_T) state = .lost;
+        if (bot_count == 0 or collapse_t >= COLLAPSE_T) {
+            if (state != .lost) addShake(11);
+            state = .lost;
+        }
         if (allOwned()) state = .won;
     } else {
         stepBots(dt);
@@ -991,6 +1112,16 @@ fn glow(cx: f32, cy: f32, r: f32, cr: u32, cg: u32, cb: u32, intensity: f32) voi
 fn render() void {
     fadeBuffer();
 
+    // parallax motes (background depth)
+    var mi: usize = 0;
+    while (mi < MOTE_COUNT) : (mi += 1) {
+        const c = scaleColor(rgb(40, 120, 80), mote_b[mi] * 0.5);
+        plot(@intFromFloat(mote_x[mi]), @intFromFloat(mote_y[mi]), c);
+        if (mote_b[mi] > 0.45) {
+            plot(@intFromFloat(mote_x[mi] + 1), @intFromFloat(mote_y[mi]), scaleColor(c, 0.5));
+        }
+    }
+
     var gx: f32 = 0;
     while (gx < W) : (gx += 30) fillRect(gx, 72, 1, H - 72, COL_GRID);
     var gy: f32 = 72;
@@ -1042,7 +1173,8 @@ fn render() void {
         fillRect(parts[p].x - 1, parts[p].y - 1, 2, 2, scaleColor(parts[p].color, k));
     }
 
-    const bc = if (surge_t > 0) COL_BOT_SURGE else COL_BOT;
+    const cloaked = cloak_t > 0;
+    const bc = if (surge_t > 0) COL_BOT_SURGE else if (cloaked) rgb(40, 120, 150) else COL_BOT;
     const bdim = scaleColor(bc, 0.5);
     var b: usize = 0;
     while (b < bot_count) : (b += 1) {
@@ -1064,11 +1196,26 @@ fn render() void {
     while (s < sent_count) : (s += 1) {
         const sx = sent_x[s];
         const sy = sent_y[s];
-        circleOutline(sx, sy, SENT_KILL_R, scaleColor(COL_SENT, 0.45));
-        const pr = SENT_SCARE_R * (0.6 + 0.4 * pulse(anim_t * 3 + @as(f32, @floatFromInt(s))));
-        circleOutline(sx, sy, pr, rgb(60, 12, 14));
-        fillCircle(sx, sy, 5, COL_SENT);
-        fillCircle(sx, sy, 2.5, rgb(255, 220, 220));
+        if (sent_stun[s] > 0) {
+            // frozen by EMP — icy and inert
+            circleOutline(sx, sy, SENT_KILL_R, rgb(80, 150, 200));
+            circleOutline(sx, sy, SENT_KILL_R + 3, rgb(40, 90, 130));
+            fillCircle(sx, sy, 5, rgb(150, 210, 255));
+            fillCircle(sx, sy, 2.5, rgb(240, 250, 255));
+        } else {
+            circleOutline(sx, sy, SENT_KILL_R, scaleColor(COL_SENT, 0.45));
+            const pr = SENT_SCARE_R * (0.6 + 0.4 * pulse(anim_t * 3 + @as(f32, @floatFromInt(s))));
+            circleOutline(sx, sy, pr, rgb(60, 12, 14));
+            fillCircle(sx, sy, 5, COL_SENT);
+            fillCircle(sx, sy, 2.5, rgb(255, 220, 220));
+        }
+    }
+
+    // EMP shockwave
+    if (emp_ring_t >= 0) {
+        const er = emp_ring_t * (EMP_R / 0.55);
+        circleOutline(emp_ring_x, emp_ring_y, er, scaleColor(rgb(120, 200, 255), 1 - emp_ring_t / 0.55));
+        circleOutline(emp_ring_x, emp_ring_y, er * 0.7, scaleColor(rgb(120, 200, 255), (1 - emp_ring_t / 0.55) * 0.6));
     }
 
     if (state == .playing) {
@@ -1094,7 +1241,11 @@ fn render() void {
     }
     s = 0;
     while (s < sent_count) : (s += 1) {
-        glow(sent_x[s], sent_y[s], 20, 70, 14, 16, 0.55);
+        if (sent_stun[s] > 0) {
+            glow(sent_x[s], sent_y[s], 20, 24, 60, 80, 0.6);
+        } else {
+            glow(sent_x[s], sent_y[s], 20, 70, 14, 16, 0.55);
+        }
     }
     if (surge_t > 0) {
         glow(cx, cy, 42, 50, 70, 60, 0.45);
@@ -1132,6 +1283,53 @@ export fn getSurge() f32 {
 }
 export fn getHeat() f32 {
     return clampf(heat, 0, 1);
+}
+export fn getShake() f32 {
+    return shake_mag;
+}
+fn ready01(cd: f32, max: f32) f32 {
+    if (cd <= 0) return 1.0;
+    return clampf(1.0 - cd / max, 0, 1);
+}
+export fn getEmp() f32 {
+    return ready01(emp_cd, EMP_CD);
+}
+export fn getFork() f32 {
+    return ready01(fork_cd, FORK_CD);
+}
+export fn getCloak() f32 {
+    return ready01(cloak_cd, CLOAK_CD);
+}
+export fn abEmp() void {
+    if (state != .playing or emp_cd > 0) return;
+    emp_cd = EMP_CD;
+    var cx: f32 = 0;
+    var cy: f32 = 0;
+    centroid(&cx, &cy);
+    emp_ring_x = cx;
+    emp_ring_y = cy;
+    emp_ring_t = 0;
+    addShake(7);
+    var s: usize = 0;
+    while (s < sent_count) : (s += 1) {
+        if (dist2(sent_x[s], sent_y[s], cx, cy) < EMP_R * EMP_R) sent_stun[s] = EMP_DUR;
+    }
+}
+export fn abFork() void {
+    if (state != .playing or fork_cd > 0) return;
+    fork_cd = FORK_CD;
+    var cx: f32 = 0;
+    var cy: f32 = 0;
+    centroid(&cx, &cy);
+    addShake(4);
+    burst(cx, cy, 30, 150, COL_BOT);
+    var k: usize = 0;
+    while (k < FORK_N) : (k += 1) addBot(cx + rndRange(-22, 22), cy + rndRange(-22, 22));
+}
+export fn abCloak() void {
+    if (state != .playing or cloak_cd > 0) return;
+    cloak_cd = CLOAK_CD;
+    cloak_t = CLOAK_DUR;
 }
 export fn getNodeX(i: i32) f32 {
     const u: usize = @intCast(i);
