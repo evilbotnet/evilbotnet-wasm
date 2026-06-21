@@ -52,6 +52,12 @@
   .ab.ready .fill { width:100% !important; opacity:.26; }
   .ab-surge { --ac:#eafff1; } .ab-emp { --ac:var(--blu); } .ab-fork { --ac:var(--grn); } .ab-cloak { --ac:var(--tea); }
 
+  #exit { position:absolute; top:9px; right:10px; z-index:6; pointer-events:auto; display:none;
+    align-items:center; justify-content:center; height:26px; padding:0 11px; border-radius:13px;
+    font-size:11px; font-weight:800; letter-spacing:1px; color:#caa; cursor:pointer;
+    border:1px solid rgba(255,80,90,.3); background:rgba(20,8,9,.55); backdrop-filter:blur(2px); }
+  #exit.armed { color:#fff; border-color:var(--red); background:rgba(70,12,16,.8); box-shadow:0 0 12px rgba(255,60,70,.4); }
+
   .panel { position:absolute; inset:0; display:none; z-index:7; pointer-events:none; flex-direction:column; align-items:center;
     justify-content:center; gap:14px; text-align:center; padding:24px;
     background: radial-gradient(ellipse at center, rgba(4,6,5,.6), rgba(4,6,5,.93)); }
@@ -102,6 +108,7 @@
       <div id="heatbar"></div>
     </div>
     <div id="abilities"></div>
+    <div id="exit">EXIT</div>
 
     <div id="menu" class="panel show">
       <div id="title">EVILBOTNET</div>
@@ -119,6 +126,7 @@
     <div id="over" class="panel">
       <div id="title2" style="font-size:clamp(24px,7.5vmin,40px);font-weight:900;letter-spacing:3px;color:#ffd2d4;text-shadow:0 0 18px rgba(255,60,70,.5)">SWARM WIPED</div>
       <div id="overSub" style="font-size:clamp(13px,4vmin,17px);color:#9fdcb6;line-height:1.5"></div>
+      <div id="overStats" style="display:grid;grid-template-columns:1fr 1fr;gap:2px 18px;width:min(86%,330px);font-size:11px;color:#9fdcb6;opacity:.92;padding:9px 11px;border-radius:10px;background:rgba(10,20,15,.5);border:1px solid rgba(60,255,130,.14);letter-spacing:.5px"></div>
       <div style="color:var(--amber);font-weight:800;letter-spacing:1px;animation:blink 1.1s steps(2,start) infinite">TAP TO RUN AGAIN</div>
     </div>
   </div>
@@ -137,12 +145,15 @@
   let W=450, H=780, imageData=null, fbPtr=0;
   let meta="menu"; // menu | playing | draft | over
 
-  let best=0; try{ best=parseInt(localStorage.getItem("evilbotnet_best")||"0")||0; }catch(e){}
-  function saveBest(){ try{ localStorage.setItem("evilbotnet_best",String(best)); }catch(e){} }
+  let bestLevel=0, bestScore=0;
+  try{ bestLevel=parseInt(localStorage.getItem("evilbotnet_best")||"0")||0;
+       bestScore=parseInt(localStorage.getItem("evilbotnet_bestscore")||"0")||0; }catch(e){}
+  function saveBest(){ try{ localStorage.setItem("evilbotnet_best",String(bestLevel));
+       localStorage.setItem("evilbotnet_bestscore",String(bestScore)); }catch(e){} }
 
-  const run={ level:1, mods:null, unlocked:null };
+  const run={ level:1, score:0, mods:null, unlocked:null };
   function defaultRun(){
-    run.level=1;
+    run.level=1; run.score=0;
     run.mods={ swarmCap:700, startBots:90, infect:1.0, botSpeed:1.0, cooldown:1.0 };
     run.unlocked={ surge:true, emp:false, fork:false, cloak:false };
   }
@@ -195,7 +206,7 @@
   function hidePanels(){ menu.classList.remove("show"); draftEl.classList.remove("show"); overEl.classList.remove("show"); }
 
   let draftReadyAt = 0;
-  function renderBuildStats(){
+  function buildStatsHTML(){
     const m=run.mods, u=run.unlocked;
     const ab=["SURGE"]; if(u.emp)ab.push("EMP"); if(u.fork)ab.push("FORK"); if(u.cloak)ab.push("CLOAK");
     const rows=[
@@ -206,8 +217,7 @@
       ["START BOTS", m.startBots],
       ["ABILITIES", ab.length+"/4"],
     ];
-    $("buildStats").innerHTML =
-      rows.map(r=>'<div class="row"><span>'+r[0]+'</span><span class="sv">'+r[1]+'</span></div>').join("") +
+    return rows.map(r=>'<div class="row"><span>'+r[0]+'</span><span class="sv">'+r[1]+'</span></div>').join("") +
       '<div class="row full"><span>UNLOCKED</span><span class="sv">'+ab.join(" \u00b7 ")+'</span></div>';
   }
   function showDraft(){
@@ -216,7 +226,7 @@
     for(let i=pool.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [pool[i],pool[j]]=[pool[j],pool[i]]; }
     const pick=pool.slice(0,3);
     $("draftTitle").textContent = "LEVEL "+run.level+" SECURED";
-    renderBuildStats();
+    $("buildStats").innerHTML = buildStatsHTML();
     cardsEl.innerHTML="";
     draftReadyAt = performance.now()+500; // arm after a beat so a stray tap can't pick
     for(const up of pick){
@@ -224,7 +234,7 @@
       el.innerHTML='<div class="cn">'+up.name+'</div><div class="cd">'+up.desc+'</div>';
       el.addEventListener("pointerdown",(e)=>{
         e.preventDefault();
-        if(performance.now() < draftReadyAt) return; // not armed yet
+        if(performance.now() < draftReadyAt) return;
         up.apply(run.mods, run.unlocked); nextLevel();
       },{passive:false});
       cardsEl.appendChild(el);
@@ -233,13 +243,17 @@
     setTimeout(()=>{ for(const c of cardsEl.children) c.classList.add("armed"); }, 500);
   }
 
-  function onGameOver(){
-    if(run.level-1>best){ best=run.level-1; saveBest(); }  // levels fully cleared
-    const cleared=run.level-1;
-    overSub.innerHTML = "Cleared <b style='color:#eafff1'>"+cleared+"</b> level"+(cleared===1?"":"s")+
-      ".<br>Best: <b style='color:var(--amber)'>"+best+"</b>";
+  function onGameOver(abandoned){
+    if(run.level>bestLevel) bestLevel=run.level;
+    if(run.score>bestScore) bestScore=run.score;
+    saveBest();
+    $("title2").textContent = abandoned ? "RUN ABANDONED" : "SWARM WIPED";
+    overSub.innerHTML = "Reached <b style='color:#eafff1'>Level "+run.level+"</b> &middot; Score <b style='color:var(--amber)'>"+run.score+"</b><br>"+
+      "Best: Level <b>"+bestLevel+"</b> &middot; "+bestScore+" pts";
+    $("overStats").innerHTML = buildStatsHTML();
     overEl.classList.add("show");
   }
+  function endRun(){ if(meta==="playing"){ meta="over"; onGameOver(true); } }
 
   // ---- input ----
   function pt(e){ const t=(e.touches&&e.touches[0])?e.touches[0]:e; return [t.clientX,t.clientY]; }
@@ -276,6 +290,16 @@
     else return;
     sendKeys();
   });
+
+  const exitBtn=$("exit");
+  let exitArmed=false, exitTimer=0;
+  function disarmExit(){ exitArmed=false; exitBtn.textContent="EXIT"; exitBtn.classList.remove("armed"); clearTimeout(exitTimer); }
+  exitBtn.addEventListener("pointerdown",(e)=>{
+    e.preventDefault(); if(meta!=="playing") return;
+    if(!exitArmed){ exitArmed=true; exitBtn.textContent="END?"; exitBtn.classList.add("armed");
+      clearTimeout(exitTimer); exitTimer=setTimeout(disarmExit, 2000); }
+    else { disarmExit(); endRun(); }
+  },{passive:false});
 
   async function load(){
     loading=true; mTitle.className=""; mTitle.textContent="EVILBOTNET"; mSub.innerHTML="Loading core&hellip;"; mBlink.textContent="\u00a0"; menu.classList.add("show");
@@ -324,10 +348,14 @@
 
     if(meta==="playing"){
       const s=w.getState();
-      if(s===2){ meta="draft"; showDraft(); }
-      else if(s===3){ meta="over"; onGameOver(); }
+      if(s===2){ run.score += run.level*100; meta="draft"; showDraft(); }
+      else if(s===3){ meta="over"; onGameOver(false); }
     }
     hud();
+
+    const showExit=(meta==="playing");
+    exitBtn.style.display = showExit ? "flex" : "none";
+    if(!showExit && exitArmed) disarmExit();
 
     const sh=w.getShake?w.getShake():0;
     if(sh>0.3) stage.style.transform=`translate(${(Math.random()-0.5)*sh}px, ${(Math.random()-0.5)*sh}px)`;
