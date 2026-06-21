@@ -21,7 +21,7 @@ your swarm or scrub your nodes back to clean.
 Lead sentinels into the maze walls and block obstacles — they snag briefly, which
 buys you time (they always free themselves, so it never clogs).
 
-**Roguelite runs:** each level is a network raid. Level 1 starts tiny (3 nodes, one sentinel, open field); clear every node and you **draft one of three upgrades** — bigger swarm, faster spread, overclocked bots, shorter cooldowns, or **unlock a new ability** (EMP / FORK / CLOAK). Then the next level escalates: more nodes, more sentinels, rising **HEAT**, and eventually maze walls. Lose your swarm and the run ends — how many levels can you clear? (Best level persists locally.)
+**Roguelite runs:** each level is a network raid. Level 1 starts tiny (3 nodes, one sentinel, open field); clear every node and you **draft one of three upgrades** — bigger swarm, faster spread, overclocked bots, shorter cooldowns, or **unlock a new ability** (EMP / FORK / CLOAK). Then the next level escalates: more nodes, more sentinels, rising **HEAT**, and eventually scattered rock obstacles. Lose your swarm and the run ends — how many levels can you clear? (Best level persists locally.)
 
 Captures are sticky (ownership hysteresis), so you can push outward — but leave a
 node undefended too long and a sentinel will grind it back.
@@ -30,7 +30,7 @@ node undefended too long and a sentinel will grind it back.
 
 - `src/main.zig` — the whole game: xorshift RNG, a **spatial-hash grid** for
   ~O(n) flocking (separation / alignment / cohesion + seek + threat-avoidance),
-  **maze walls** with steering avoidance, node infection with hysteresis, a
+  small circular **rock obstacles** with steering avoidance, node infection with hysteresis, a
   **HEAT** escalation system, EDR sentinel AI, particles, **trails + additive
   bloom**, and a software rasterizer writing `u32` RGBA pixels.
 - Target is `wasm32-freestanding` — **no libc, no allocator.** Fixed global

@@ -45,9 +45,9 @@ const NCELLS: usize = GW * GH;
 const GWi: i32 = @intCast(GW);
 const GHi: i32 = @intCast(GH);
 
-// maze walls
-const MAX_WALLS: usize = 16;
-const WALL_MARGIN: f32 = 13; // repulsion onset distance from a wall
+// circular rock obstacles
+const MAX_ROCKS: usize = 14;
+const ROCK_MARGIN: f32 = 9; // soft repulsion band outside a rock
 
 // HEAT: rises with takeover; ramps sentinel pressure for a real endgame
 var heat: f32 = 0;
@@ -136,8 +136,9 @@ const COL_CLEAN = rgb(70, 120, 150);
 const COL_CONTEST = rgb(255, 190, 70);
 const COL_OWNED = rgb(60, 255, 110);
 const COL_SENT = rgb(255, 60, 70);
-const COL_WALL = rgb(24, 44, 40);
-const COL_WALL_EDGE = rgb(46, 92, 78);
+const COL_ROCK = rgb(30, 46, 42);
+const COL_ROCK_HI = rgb(58, 90, 80);
+const COL_ROCK_LO = rgb(14, 24, 22);
 
 // ---------------- math ----------------
 inline fn clampf(v: f32, lo: f32, hi: f32) f32 {
@@ -283,12 +284,11 @@ const Particle = struct { x: f32, y: f32, vx: f32, vy: f32, life: f32, max: f32,
 var parts: [MAX_PART]Particle = undefined;
 var part_count: usize = 0;
 
-// maze walls (axis-aligned rects): x0,y0,x1,y1
-var wall_x0: [MAX_WALLS]f32 = undefined;
-var wall_y0: [MAX_WALLS]f32 = undefined;
-var wall_x1: [MAX_WALLS]f32 = undefined;
-var wall_y1: [MAX_WALLS]f32 = undefined;
-var wall_count: usize = 0;
+// circular rock obstacles
+var rock_x: [MAX_ROCKS]f32 = undefined;
+var rock_y: [MAX_ROCKS]f32 = undefined;
+var rock_r: [MAX_ROCKS]f32 = undefined;
+var rock_count: usize = 0;
 
 const State = enum(i32) { ready = 0, playing = 1, won = 2, lost = 3 };
 var state: State = .ready;
@@ -369,158 +369,88 @@ fn pulse(t: f32) f32 {
     return if (f < 0.5) f * 2 else (1 - f) * 2;
 }
 
-// ---------------- walls (maze) ----------------
-fn pushWall(x0: f32, y0: f32, x1: f32, y1: f32) void {
-    if (wall_count >= MAX_WALLS) return;
-    wall_x0[wall_count] = x0;
-    wall_y0[wall_count] = y0;
-    wall_x1[wall_count] = x1;
-    wall_y1[wall_count] = y1;
-    wall_count += 1;
+// ---------------- rocks (small circular obstacles) ----------------
+fn pushRock(x: f32, y: f32, r: f32) void {
+    if (rock_count >= MAX_ROCKS) return;
+    rock_x[rock_count] = x;
+    rock_y[rock_count] = y;
+    rock_r[rock_count] = r;
+    rock_count += 1;
 }
 
 fn buildWalls() void {
-    wall_count = 0;
+    rock_count = 0;
     if (cfg_walls <= 0) return; // early levels: open field
 
-    // Coarse room grid; carve dividers with a random opening per line so the
-    // field reads as a maze but stays connected and flockable. Density grows
-    // with cfg_walls.
-    const cols: usize = if (cfg_walls >= 3) 3 else 2;
-    const rows: usize = 2 + @as(usize, @intCast(@min(cfg_walls, 2)));
-    const ix0: f32 = 34;
-    const ix1: f32 = W - 34;
-    const iy0: f32 = 118;
-    const iy1: f32 = H - 150;
-    const cw = (ix1 - ix0) / @as(f32, @floatFromInt(cols));
-    const ch = (iy1 - iy0) / @as(f32, @floatFromInt(rows));
-    const t: f32 = 5; // half-thickness
-
-    // horizontal dividers (between rows), each missing one column segment
-    var r: usize = 1;
-    while (r < rows) : (r += 1) {
-        const yy = iy0 + ch * @as(f32, @floatFromInt(r));
-        const gap = rnd() % cols;
-        var c: usize = 0;
-        while (c < cols) : (c += 1) {
-            if (c == gap) continue;
-            const wx0 = ix0 + cw * @as(f32, @floatFromInt(c)) + 8;
-            const wx1 = ix0 + cw * @as(f32, @floatFromInt(c + 1)) - 8;
-            pushWall(wx0, yy - t, wx1, yy + t);
+    // A few small organic rocks, scattered. Count grows slowly with level;
+    // kept small + minimal so they texture the field without chopping it up.
+    const want: usize = @min(@as(usize, @intCast(cfg_walls)) + 1, MAX_ROCKS);
+    const ix0: f32 = 40;
+    const ix1: f32 = W - 40;
+    const iy0: f32 = 120;
+    const iy1: f32 = H - 160;
+    var placed: usize = 0;
+    var tries: usize = 0;
+    while (placed < want and tries < 400) : (tries += 1) {
+        const x = rndRange(ix0, ix1);
+        const y = rndRange(iy0, iy1);
+        const r = rndRange(8, 15);
+        var ok = true;
+        var j: usize = 0;
+        while (j < rock_count) : (j += 1) {
+            if (dist2(x, y, rock_x[j], rock_y[j]) < (r + rock_r[j] + 30) * (r + rock_r[j] + 30)) {
+                ok = false;
+                break;
+            }
         }
-    }
-    // vertical dividers (between cols), each missing one row segment
-    var c2: usize = 1;
-    while (c2 < cols) : (c2 += 1) {
-        const xx = ix0 + cw * @as(f32, @floatFromInt(c2));
-        const gap = rnd() % rows;
-        var rr: usize = 0;
-        while (rr < rows) : (rr += 1) {
-            if (rr == gap) continue;
-            const wy0 = iy0 + ch * @as(f32, @floatFromInt(rr)) + 8;
-            const wy1 = iy0 + ch * @as(f32, @floatFromInt(rr + 1)) - 8;
-            pushWall(xx - t, wy0, xx + t, wy1);
+        if (ok) {
+            pushRock(x, y, r);
+            placed += 1;
         }
-    }
-
-    // a couple of block obstacles only at higher densities
-    const blocks: usize = if (cfg_walls >= 4) 2 else if (cfg_walls >= 3) 1 else 0;
-    var nb: usize = 0;
-    while (nb < blocks and wall_count < MAX_WALLS) : (nb += 1) {
-        const bw = rndRange(30, 50);
-        const bh = rndRange(26, 46);
-        const bx = rndRange(ix0 + 12, ix1 - bw - 12);
-        const by = rndRange(iy0 + 12, iy1 - bh - 12);
-        pushWall(bx, by, bx + bw, by + bh);
     }
 }
 
 fn nearAnyWall(x: f32, y: f32, pad: f32) bool {
     var w: usize = 0;
-    while (w < wall_count) : (w += 1) {
-        if (x > wall_x0[w] - pad and x < wall_x1[w] + pad and
-            y > wall_y0[w] - pad and y < wall_y1[w] + pad) return true;
+    while (w < rock_count) : (w += 1) {
+        const rr = rock_r[w] + pad;
+        if (dist2(x, y, rock_x[w], rock_y[w]) < rr * rr) return true;
     }
     return false;
 }
 
 fn wallForce(x: f32, y: f32, ax: *f32, ay: *f32) void {
     var w: usize = 0;
-    while (w < wall_count) : (w += 1) {
-        const rx0 = wall_x0[w];
-        const ry0 = wall_y0[w];
-        const rx1 = wall_x1[w];
-        const ry1 = wall_y1[w];
-        if (x > rx0 and x < rx1 and y > ry0 and y < ry1) {
-            // inside: shove out the nearest face
-            const dl = x - rx0;
-            const dr = rx1 - x;
-            const dtp = y - ry0;
-            const db = ry1 - y;
-            var nx: f32 = -1;
-            var ny: f32 = 0;
-            var md = dl;
-            if (dr < md) {
-                md = dr;
-                nx = 1;
-                ny = 0;
-            }
-            if (dtp < md) {
-                md = dtp;
-                nx = 0;
-                ny = -1;
-            }
-            if (db < md) {
-                md = db;
-                nx = 0;
-                ny = 1;
-            }
-            ax.* += nx * BOT_FORCE * 2.4;
-            ay.* += ny * BOT_FORCE * 2.4;
-        } else {
-            const cxp = clampf(x, rx0, rx1);
-            const cyp = clampf(y, ry0, ry1);
-            const dx = x - cxp;
-            const dy = y - cyp;
-            const d2 = dx * dx + dy * dy;
-            if (d2 < WALL_MARGIN * WALL_MARGIN and d2 > 0.0001) {
-                const dd = @sqrt(d2);
-                const f = 1.0 - dd / WALL_MARGIN;
-                ax.* += (dx / dd) * f * BOT_FORCE * 1.7;
-                ay.* += (dy / dd) * f * BOT_FORCE * 1.7;
-            }
+    while (w < rock_count) : (w += 1) {
+        const dx = x - rock_x[w];
+        const dy = y - rock_y[w];
+        const d2 = dx * dx + dy * dy;
+        const reach = rock_r[w] + ROCK_MARGIN;
+        if (d2 < reach * reach and d2 > 0.0001) {
+            const dd = @sqrt(d2);
+            // push hardest inside the rock, easing out across the margin band
+            const f = if (dd < rock_r[w]) 1.0 + (rock_r[w] - dd) / rock_r[w] else 1.0 - (dd - rock_r[w]) / ROCK_MARGIN;
+            ax.* += (dx / dd) * f * BOT_FORCE * 1.9;
+            ay.* += (dy / dd) * f * BOT_FORCE * 1.9;
         }
     }
 }
 
 fn resolveWalls(x: *f32, y: *f32) void {
     var w: usize = 0;
-    while (w < wall_count) : (w += 1) {
-        if (x.* > wall_x0[w] and x.* < wall_x1[w] and y.* > wall_y0[w] and y.* < wall_y1[w]) {
-            const dl = x.* - wall_x0[w];
-            const dr = wall_x1[w] - x.*;
-            const dtp = y.* - wall_y0[w];
-            const db = wall_y1[w] - y.*;
-            var md = dl;
-            var ex = wall_x0[w] - 0.5;
-            var ey = y.*;
-            if (dr < md) {
-                md = dr;
-                ex = wall_x1[w] + 0.5;
-                ey = y.*;
+    while (w < rock_count) : (w += 1) {
+        const dx = x.* - rock_x[w];
+        const dy = y.* - rock_y[w];
+        const d2 = dx * dx + dy * dy;
+        const rr = rock_r[w] + 0.5;
+        if (d2 < rr * rr) {
+            const dd = @sqrt(d2);
+            if (dd > 0.001) {
+                x.* = rock_x[w] + (dx / dd) * rr;
+                y.* = rock_y[w] + (dy / dd) * rr;
+            } else {
+                x.* = rock_x[w] + rr;
             }
-            if (dtp < md) {
-                md = dtp;
-                ex = x.*;
-                ey = wall_y0[w] - 0.5;
-            }
-            if (db < md) {
-                md = db;
-                ex = x.*;
-                ey = wall_y1[w] + 0.5;
-            }
-            x.* = ex;
-            y.* = ey;
         }
     }
 }
@@ -1149,12 +1079,16 @@ fn render() void {
     var gy: f32 = 72;
     while (gy < H) : (gy += 30) fillRect(0, gy, W, 1, COL_GRID);
 
-    // maze walls
+    // rocks (small organic obstacles)
     var wi: usize = 0;
-    while (wi < wall_count) : (wi += 1) {
-        fillRect(wall_x0[wi], wall_y0[wi], wall_x1[wi] - wall_x0[wi], wall_y1[wi] - wall_y0[wi], COL_WALL);
-        fillRect(wall_x0[wi], wall_y0[wi], wall_x1[wi] - wall_x0[wi], 1, COL_WALL_EDGE);
-        fillRect(wall_x0[wi], wall_y1[wi] - 1, wall_x1[wi] - wall_x0[wi], 1, COL_WALL_EDGE);
+    while (wi < rock_count) : (wi += 1) {
+        const rx = rock_x[wi];
+        const ry = rock_y[wi];
+        const rr = rock_r[wi];
+        fillCircle(rx, ry + 1, rr, COL_ROCK_LO); // drop shadow
+        fillCircle(rx, ry, rr, COL_ROCK); // body
+        fillCircle(rx - rr * 0.3, ry - rr * 0.3, rr * 0.42, COL_ROCK_HI); // top-left highlight
+        circleOutline(rx, ry, rr, scaleColor(COL_ROCK_HI, 0.5));
     }
 
     var l: usize = 0;
