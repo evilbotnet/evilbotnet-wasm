@@ -26,6 +26,13 @@
     background: radial-gradient(ellipse 78% 66% at 50% 46%, transparent 52%, rgba(0,0,0,.62) 100%); }
   #scan { position:absolute; inset:0; pointer-events:none; z-index:3; opacity:.45; mix-blend-mode:multiply;
     background: repeating-linear-gradient(to bottom, rgba(0,0,0,0) 0 2px, rgba(0,0,0,.12) 2px 3px); }
+  #flash { position:absolute; inset:0; pointer-events:none; z-index:4; opacity:0; will-change:opacity;
+    background: radial-gradient(ellipse 72% 56% at 50% 52%, rgba(70,255,160,.55), rgba(70,255,160,0) 70%);
+    mix-blend-mode:screen; }
+  #mute { position:absolute; top:9px; left:10px; z-index:6; pointer-events:auto; width:32px; height:26px;
+    border-radius:8px; display:flex; align-items:center; justify-content:center; font-size:13px; cursor:pointer;
+    border:1px solid rgba(120,160,140,.3); background:rgba(8,16,12,.55); backdrop-filter:blur(2px); }
+  #mute.off { color:#5a6b63; border-color:rgba(120,160,140,.18); }
 
   #hud { position:absolute; inset:0; pointer-events:none; z-index:5; }
   #top { position:absolute; top:0; left:0; right:0; height:72px; display:flex; align-items:center;
@@ -103,6 +110,7 @@
     <canvas id="screen" width="450" height="780"></canvas>
     <div id="vignette"></div>
     <div id="scan"></div>
+    <div id="flash"></div>
     <div id="hud">
       <div id="top">
         <div class="stat" id="s-lvl"><b>1</b><span>LEVEL</span></div>
@@ -114,6 +122,7 @@
     </div>
     <div id="abilities"></div>
     <div id="exit">EXIT</div>
+    <div id="mute">🔊</div>
 
     <div id="menu" class="panel show">
       <div id="title">EVILBOTNET</div>
@@ -165,22 +174,25 @@
     run.unlocked={ surge:true, emp:false, fork:false, cloak:false };
   }
 
+  const CAP_SWARM=3200, CAP_INFECT=6.0, CAP_SPEED=3.0, MIN_CD=0.2, CAP_START=600;
   const UPGRADES=[
-    {id:"cap",  name:"BIGGER BOTNET",  desc:"+400 max swarm size",        apply:(m)=>m.swarmCap+=400},
-    {id:"inf",  name:"FASTER SPREAD",  desc:"+25% infection rate",        apply:(m)=>m.infect*=1.25},
-    {id:"spd",  name:"OVERCLOCK",      desc:"+12% bot speed",             apply:(m)=>m.botSpeed*=1.12},
-    {id:"res",  name:"DEEP RESERVES",  desc:"+40 starting bots",          apply:(m)=>m.startBots+=40},
-    {id:"cd",   name:"RAPID TOOLING",  desc:"-15% ability cooldowns",     apply:(m)=>m.cooldown*=0.85},
+    {id:"cap",  name:"BIGGER BOTNET",  desc:"+400 max swarm size",        apply:(m)=>m.swarmCap=Math.min(m.swarmCap+400,CAP_SWARM), maxed:(m)=>m.swarmCap>=CAP_SWARM},
+    {id:"inf",  name:"FASTER SPREAD",  desc:"+25% infection rate",        apply:(m)=>m.infect=Math.min(m.infect*1.25,CAP_INFECT), maxed:(m)=>m.infect>=CAP_INFECT-1e-6},
+    {id:"spd",  name:"OVERCLOCK",      desc:"+12% bot speed",             apply:(m)=>m.botSpeed=Math.min(m.botSpeed*1.12,CAP_SPEED), maxed:(m)=>m.botSpeed>=CAP_SPEED-1e-6},
+    {id:"res",  name:"DEEP RESERVES",  desc:"+40 starting bots",          apply:(m)=>m.startBots=Math.min(m.startBots+40,CAP_START), maxed:(m)=>m.startBots>=CAP_START},
+    {id:"cd",   name:"RAPID TOOLING",  desc:"-15% ability cooldowns",     apply:(m)=>m.cooldown=Math.max(m.cooldown*0.85,MIN_CD), maxed:(m)=>m.cooldown<=MIN_CD+1e-6},
     {id:"emp",  name:"UNLOCK: EMP",    desc:"Freeze nearby sentinels (Q)",   unlock:"emp",   apply:(m,u)=>u.emp=true},
     {id:"fork", name:"UNLOCK: FORK",   desc:"Mass +180 bots instantly (F)",  unlock:"fork",  apply:(m,u)=>u.fork=true},
     {id:"cloak",name:"UNLOCK: CLOAK",  desc:"Vanish from the EDR (C)",        unlock:"cloak", apply:(m,u)=>u.cloak=true},
   ];
+  // always-available fallback so a draft is never empty / never a dead pick
+  const FALLBACK={id:"over", name:"OVERDRIVE", desc:"+300 bonus score", apply:()=>{ run.score+=300; }};
 
   const ABILS=[
-    {id:"surge",lab:"SURGE",key:"SPACE",cls:"ab-surge",always:true,get:()=>w.getSurge(),act:()=>w.press()},
-    {id:"emp",  lab:"EMP",  key:"Q",    cls:"ab-emp",  get:()=>w.getEmp(),  act:()=>w.abEmp()},
-    {id:"fork", lab:"FORK", key:"F",    cls:"ab-fork", get:()=>w.getFork(), act:()=>w.abFork()},
-    {id:"cloak",lab:"CLOAK",key:"C",    cls:"ab-cloak",get:()=>w.getCloak(),act:()=>w.abCloak()},
+    {id:"surge",lab:"SURGE",key:"SPACE",cls:"ab-surge",always:true,get:()=>w.getSurge(),act:()=>{ const r=w.getSurge()>=1; w.press(); if(r) AUD.surge(); }},
+    {id:"emp",  lab:"EMP",  key:"Q",    cls:"ab-emp",  get:()=>w.getEmp(),  act:()=>{ const r=w.getEmp()>=1; w.abEmp(); if(r) AUD.emp(); }},
+    {id:"fork", lab:"FORK", key:"F",    cls:"ab-fork", get:()=>w.getFork(), act:()=>{ const r=w.getFork()>=1; w.abFork(); if(r) AUD.fork(); }},
+    {id:"cloak",lab:"CLOAK",key:"C",    cls:"ab-cloak",get:()=>w.getCloak(),act:()=>{ const r=w.getCloak()>=1; w.abCloak(); if(r) AUD.cloak(); }},
   ];
   let abButtons=[];
   function buildAbilityBar(){
@@ -213,8 +225,8 @@
     w.init(((Date.now()>>>0) ^ (L*0x9e3779b1)) >>> 0);
     w.press();
   }
-  function startRun(){ defaultRun(); buildAbilityBar(); hidePanels(); configLevel(); meta="playing"; }
-  function nextLevel(){ run.level++; buildAbilityBar(); hidePanels(); configLevel(); meta="playing"; }
+  function startRun(){ defaultRun(); buildAbilityBar(); hidePanels(); AUD.start(); prevOwned=0; configLevel(); meta="playing"; }
+  function nextLevel(){ run.level++; buildAbilityBar(); hidePanels(); prevOwned=0; configLevel(); meta="playing"; }
 
   function hidePanels(){ menu.classList.remove("show"); draftEl.classList.remove("show"); overEl.classList.remove("show"); }
 
@@ -241,10 +253,11 @@
       '<div class="row full"><span>UNLOCKED</span><span class="sv">'+ab.join(" \u00b7 ")+'</span></div>';
   }
   function showDraft(){
-    const u=run.unlocked;
-    const pool=UPGRADES.filter(up=> up.unlock ? !u[up.unlock] : true);
+    const u=run.unlocked, m=run.mods;
+    const pool=UPGRADES.filter(up=> up.unlock ? !u[up.unlock] : !(up.maxed && up.maxed(m)));
     for(let i=pool.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [pool[i],pool[j]]=[pool[j],pool[i]]; }
     const pick=pool.slice(0,3);
+    while(pick.length<3) pick.push(FALLBACK); // never a dead/empty draft
     $("draftTitle").textContent = "LEVEL "+run.level+" SECURED";
     $("buildStats").innerHTML = buildStatsHTML();
     cardsEl.innerHTML="";
@@ -276,6 +289,75 @@
   }
   function endRun(){ if(meta==="playing"){ meta="over"; onGameOver(true); } }
 
+  // ---------- audio: procedural deep-fried techno + SFX ----------
+  const AUD = (function(){
+    let ctx=null, master=null, drumBus=null, friedBus=null, comp=null;
+    let playing=false, muted=false, timer=null, step=0, nextTime=0, noiseBuf=null, beatEnv=0;
+    const BPM=140, STEP=15/BPM, LOOK=0.10, TICK=25; // STEP = 60/BPM/4 (16th note)
+    try{ muted = localStorage.getItem("evilbotnet_muted")==="1"; }catch(e){}
+
+    function curve(k){ const n=1024,c=new Float32Array(n); for(let i=0;i<n;i++){const x=i/(n-1)*2-1; c[i]=Math.tanh(x*k);} return c; }
+    function noise(){ if(noiseBuf) return noiseBuf; const len=(ctx.sampleRate*0.5)|0; noiseBuf=ctx.createBuffer(1,len,ctx.sampleRate); const d=noiseBuf.getChannelData(0); for(let i=0;i<len;i++) d[i]=Math.random()*2-1; return noiseBuf; }
+    function ensure(){
+      if(ctx) return true;
+      try{
+        const AC=window.AudioContext||window.webkitAudioContext; if(!AC) return false;
+        ctx=new AC();
+        master=ctx.createGain(); master.gain.value=0.0001;
+        comp=ctx.createDynamicsCompressor();
+        comp.threshold.value=-12; comp.knee.value=8; comp.ratio.value=6; comp.attack.value=0.003; comp.release.value=0.2;
+        comp.connect(master); master.connect(ctx.destination);
+        drumBus=ctx.createGain(); drumBus.gain.value=0.95; drumBus.connect(comp);
+        const ws=ctx.createWaveShaper(); ws.curve=curve(2.6); ws.oversample="4x";
+        friedBus=ctx.createGain(); friedBus.gain.value=0.5; friedBus.connect(ws); ws.connect(comp);
+        return true;
+      }catch(e){ ctx=null; return false; }
+    }
+    // instruments
+    function kick(t){
+      const o=ctx.createOscillator(), g=ctx.createGain();
+      o.frequency.setValueAtTime(150,t); o.frequency.exponentialRampToValueAtTime(48,t+0.08);
+      g.gain.setValueAtTime(1.0,t); g.gain.exponentialRampToValueAtTime(0.0001,t+0.22);
+      o.connect(g); g.connect(drumBus); o.start(t); o.stop(t+0.24);
+      const dly=(t-ctx.currentTime)*1000; setTimeout(()=>{ beatEnv=1; }, Math.max(0,dly));
+    }
+    function sub(t,f){ const o=ctx.createOscillator(),g=ctx.createGain(); o.type="triangle"; o.frequency.setValueAtTime(f,t); g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(0.45,t+0.01); g.gain.exponentialRampToValueAtTime(0.0001,t+0.16); o.connect(g); g.connect(drumBus); o.start(t); o.stop(t+0.18); }
+    function hat(t,open){ const s=ctx.createBufferSource(); s.buffer=noise(); const hp=ctx.createBiquadFilter(); hp.type="highpass"; hp.frequency.value=7200; const g=ctx.createGain(); const dur=open?0.07:0.028; g.gain.setValueAtTime(0.35,t); g.gain.exponentialRampToValueAtTime(0.0001,t+dur); s.connect(hp); hp.connect(g); g.connect(friedBus); s.start(t); s.stop(t+dur+0.02); }
+    function clap(t){ const s=ctx.createBufferSource(); s.buffer=noise(); const bp=ctx.createBiquadFilter(); bp.type="bandpass"; bp.frequency.value=1600; bp.Q.value=1.2; const g=ctx.createGain(); g.gain.setValueAtTime(0.55,t); g.gain.exponentialRampToValueAtTime(0.0001,t+0.12); s.connect(bp); bp.connect(g); g.connect(drumBus); s.start(t); s.stop(t+0.14); }
+    function acid(t,f,dur,accent){ const o=ctx.createOscillator(); o.type="sawtooth"; o.frequency.setValueAtTime(f,t); const lp=ctx.createBiquadFilter(); lp.type="lowpass"; lp.Q.value=9; const co=accent?5200:2400; lp.frequency.setValueAtTime(400,t); lp.frequency.exponentialRampToValueAtTime(co,t+0.02); lp.frequency.exponentialRampToValueAtTime(500,t+dur); const g=ctx.createGain(); g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(accent?0.45:0.28,t+0.012); g.gain.exponentialRampToValueAtTime(0.0001,t+dur); o.connect(lp); lp.connect(g); g.connect(friedBus); o.start(t); o.stop(t+dur+0.02); }
+    // pattern (1 bar / 16 steps)
+    const ROOT=55.0;
+    function nt(semi){ return ROOT*Math.pow(2, semi/12); }
+    const arp=[0,12,7,3, 10,7,12,15, 0,7,3,12, 10,15,7,3];
+    const subPat=[1,0,0,1, 0,0,1,0, 1,0,0,1, 0,1,0,0];
+    function schedStep(s,t){
+      if(s%4===0) kick(t);
+      if(s===4||s===12) clap(t);
+      hat(t, s%2===1);
+      if(subPat[s]) sub(t, nt(0)/2);
+      acid(t, nt(arp[s]), STEP*0.95, s%4===0);
+    }
+    function loop(){
+      if(!playing||!ctx) return;
+      while(nextTime < ctx.currentTime + LOOK){ schedStep(step%16, nextTime); nextTime+=STEP; step++; }
+      timer=setTimeout(loop, TICK);
+    }
+    function ramp(to,sec){ if(!ctx||!master) return; const n=ctx.currentTime; master.gain.cancelScheduledValues(n); master.gain.setValueAtTime(Math.max(master.gain.value,0.0001),n); master.gain.linearRampToValueAtTime(Math.max(to,0.0001), n+sec); }
+    return {
+      start(){ if(!ensure()) return; if(ctx.state==="suspended") ctx.resume(); if(!playing){ playing=true; step=0; nextTime=ctx.currentTime+0.06; loop(); } ramp(muted?0.0001:0.5, 0.4); },
+      toggle(){ muted=!muted; try{ localStorage.setItem("evilbotnet_muted", muted?"1":"0"); }catch(e){} ramp(muted?0.0001:0.5, 0.15); return muted; },
+      isMuted(){ return muted; },
+      beat(){ const b=beatEnv; beatEnv*=0.80; if(beatEnv<0.02) beatEnv=0; return b; },
+      cap(){ if(!ctx||muted) return; const t=ctx.currentTime; acid(t,nt(12),0.10,true); acid(t+0.05,nt(19),0.10,true); hat(t,true); },
+      surge(){ if(!ctx||muted) return; const t=ctx.currentTime; const o=ctx.createOscillator(); o.type="sawtooth"; o.frequency.setValueAtTime(220,t); o.frequency.exponentialRampToValueAtTime(1400,t+0.3); const g=ctx.createGain(); g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(0.4,t+0.05); g.gain.exponentialRampToValueAtTime(0.0001,t+0.35); o.connect(g); g.connect(friedBus); o.start(t); o.stop(t+0.37); },
+      emp(){ if(!ctx||muted) return; const t=ctx.currentTime; const o=ctx.createOscillator(); o.frequency.setValueAtTime(160,t); o.frequency.exponentialRampToValueAtTime(28,t+0.4); const g=ctx.createGain(); g.gain.setValueAtTime(0.8,t); g.gain.exponentialRampToValueAtTime(0.0001,t+0.45); o.connect(g); g.connect(drumBus); o.start(t); o.stop(t+0.47); const s=ctx.createBufferSource(); s.buffer=noise(); const bg=ctx.createGain(); bg.gain.setValueAtTime(0.5,t); bg.gain.exponentialRampToValueAtTime(0.0001,t+0.2); s.connect(bg); bg.connect(friedBus); s.start(t); s.stop(t+0.22); },
+      fork(){ if(!ctx||muted) return; const t=ctx.currentTime; for(let i=0;i<4;i++) acid(t+i*0.03, nt(arp[i]+12), 0.08, true); },
+      cloak(){ if(!ctx||muted) return; const t=ctx.currentTime; const o=ctx.createOscillator(); o.type="sine"; o.frequency.setValueAtTime(900,t); o.frequency.exponentialRampToValueAtTime(180,t+0.4); const g=ctx.createGain(); g.gain.setValueAtTime(0.3,t); g.gain.exponentialRampToValueAtTime(0.0001,t+0.42); o.connect(g); g.connect(friedBus); o.start(t); o.stop(t+0.44); },
+      clear(){ if(!ctx||muted) return; const t=ctx.currentTime; [0,7,12,19].forEach((s,i)=>acid(t+i*0.045, nt(s+12), 0.45, true)); },
+      loss(){ if(!ctx||muted) return; const t=ctx.currentTime; const o=ctx.createOscillator(); o.type="sawtooth"; o.frequency.setValueAtTime(300,t); o.frequency.exponentialRampToValueAtTime(50,t+0.8); const g=ctx.createGain(); g.gain.setValueAtTime(0.4,t); g.gain.exponentialRampToValueAtTime(0.0001,t+0.85); o.connect(g); g.connect(drumBus); o.start(t); o.stop(t+0.87); },
+    };
+  })();
+
   // ---- input ----
   function pt(e){ const t=(e.touches&&e.touches[0])?e.touches[0]:e; return [t.clientX,t.clientY]; }
   function rally(cx,cy){ const r=canvas.getBoundingClientRect(); w.pointerMove((cx-r.left)/r.width,(cy-r.top)/r.height); }
@@ -296,10 +378,10 @@
     else if(e.code==="ArrowUp"||e.code==="KeyW") held.u=1;
     else if(e.code==="ArrowDown"||e.code==="KeyS") held.d=1;
     else if(e.code==="Space"||e.code==="Enter"){ e.preventDefault(); if(!ready) return;
-      if(meta==="menu"||meta==="over") startRun(); else if(meta==="playing") w.press(); return; }
-    else if(e.code==="KeyQ"){ if(ready&&meta==="playing") w.abEmp(); return; }
-    else if(e.code==="KeyF"){ if(ready&&meta==="playing") w.abFork(); return; }
-    else if(e.code==="KeyC"){ if(ready&&meta==="playing") w.abCloak(); return; }
+      if(meta==="menu"||meta==="over") startRun(); else if(meta==="playing"){ const r=w.getSurge()>=1; w.press(); if(r) AUD.surge(); } return; }
+    else if(e.code==="KeyQ"){ if(ready&&meta==="playing"){ const r=w.getEmp()>=1; w.abEmp(); if(r) AUD.emp(); } return; }
+    else if(e.code==="KeyF"){ if(ready&&meta==="playing"){ const r=w.getFork()>=1; w.abFork(); if(r) AUD.fork(); } return; }
+    else if(e.code==="KeyC"){ if(ready&&meta==="playing"){ const r=w.getCloak()>=1; w.abCloak(); if(r) AUD.cloak(); } return; }
     else return;
     e.preventDefault(); sendKeys();
   });
@@ -313,6 +395,16 @@
   });
 
   const exitBtn=$("exit");
+  let prevOwned=0;
+  const flashEl=$("flash"), muteBtn=$("mute");
+  muteBtn.textContent = AUD.isMuted() ? "🔇" : "🔊";
+  muteBtn.classList.toggle("off", AUD.isMuted());
+  muteBtn.addEventListener("pointerdown",(e)=>{
+    e.preventDefault(); e.stopPropagation();
+    AUD.start(); // make sure context exists / resumes on this gesture
+    const m=AUD.toggle();
+    muteBtn.textContent = m ? "🔇" : "🔊"; muteBtn.classList.toggle("off", m);
+  },{passive:false});
   let exitArmed=false, exitTimer=0;
   function disarmExit(){ exitArmed=false; exitBtn.textContent="EXIT"; exitBtn.classList.remove("armed"); clearTimeout(exitTimer); }
   exitBtn.addEventListener("pointerdown",(e)=>{
@@ -369,11 +461,18 @@
     ctx.putImageData(imageData,0,0);
 
     if(meta==="playing"){
+      const owned=w.getNodesOwned();
+      if(owned>prevOwned) AUD.cap();
+      prevOwned=owned;
       const s=w.getState();
-      if(s===2){ run.score += run.level*100; meta="draft"; showDraft(); }
-      else if(s===3){ meta="over"; onGameOver(false); }
+      if(s===2){ run.score += run.level*100; AUD.clear(); meta="draft"; showDraft(); }
+      else if(s===3){ AUD.loss(); meta="over"; onGameOver(false); }
     }
     hud();
+
+    // beat-synced flash
+    const bp=AUD.beat();
+    flashEl.style.opacity = bp>0.02 ? (bp*0.22).toFixed(3) : "0";
 
     const showExit=(meta==="playing");
     exitBtn.style.display = showExit ? "flex" : "none";

@@ -11,7 +11,7 @@ const H: usize = 780;
 var framebuffer: [W * H]u32 = undefined;
 
 // ---------------- tunables ----------------
-const MAX_BOTS: usize = 2400;
+const MAX_BOTS: usize = 3200;
 const START_BOTS: usize = 150;
 
 const MAX_NODES: usize = 14; // array capacity
@@ -1467,7 +1467,7 @@ export fn setStartBots(n: i32) void {
     cfg_start_bots = clampUsize(n, 1, MAX_BOTS);
 }
 export fn setInfect(f: f32) void {
-    cfg_infect = clampf(f, 0.2, 4.0);
+    cfg_infect = clampf(f, 0.2, 6.0);
 }
 export fn setBotSpeed(f: f32) void {
     cfg_botspeed = clampf(f, 0.5, 3.0);

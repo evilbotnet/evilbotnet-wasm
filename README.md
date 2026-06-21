@@ -21,6 +21,9 @@ your swarm or scrub your nodes back to clean.
 - **FORK** (F) — instantly mass a burst of new bots at the swarm.
 - **CLOAK** (C) — the EDR loses sight of your swarm; sneak a capture.
 - **WASD / arrows** — nudge the rally point (desktop).
+- **Audio** — procedural deep-fried techno (synthesized live in the browser, no audio
+  files) with beat-synced flashes and SFX on every capture/ability. Toggle with the
+  speaker button.
 
 Lead sentinels into the rock obstacles — they snag briefly, which buys you time
 (they always free themselves, so it never clogs).
