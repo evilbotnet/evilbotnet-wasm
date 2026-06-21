@@ -9,8 +9,9 @@ You are the botmaster. Lead a swarm of bots across a network, smother nodes to
 your swarm or scrub your nodes back to clean.
 
 <p align="center">
-  <img src="screenshots/02-takeover.png" width="42%" alt="Mid-run: owned nodes linked up, swarm pushing, sentinels closing in" />
-  <img src="screenshots/01-swarm.png" width="42%" alt="Early game: the swarm massing onto a node on an open field" />
+  <img src="screenshots/02-takeover.png" width="32%" alt="Mid-run: owned nodes linked up, swarm pushing, sentinels closing in" />
+  <img src="screenshots/03-boss.png" width="32%" alt="Boss raid: the EDR Core with its rotating shield gap and HP core" />
+  <img src="screenshots/01-swarm.png" width="32%" alt="Early game: the swarm massing onto a node on an open field" />
 </p>
 
 ## Play
@@ -21,9 +22,6 @@ your swarm or scrub your nodes back to clean.
 - **FORK** (F) — instantly mass a burst of new bots at the swarm.
 - **CLOAK** (C) — the EDR loses sight of your swarm; sneak a capture.
 - **WASD / arrows** — nudge the rally point (desktop).
-- **Audio** — procedural deep-fried techno (synthesized live in the browser, no audio
-  files) with beat-synced flashes and SFX on every capture/ability. Toggle with the
-  speaker button.
 
 Lead sentinels into the rock obstacles — they snag briefly, which buys you time
 (they always free themselves, so it never clogs).
@@ -40,6 +38,10 @@ node undefended too long and a sentinel will grind it back.
 - **Honeypot** (amber) — capturing it springs a trap and spawns sentinels. Don't grab greedily.
 - **Firewall** (red) — a barrier that cycles on/off across the field, blocking bots *and*
   sentinels. Time your push through the gaps — or **EMP** it to drop it on demand.
+
+**Boss raids** — every 5th level is a fight against the **EDR Core**: a massive node with a
+*rotating shield gap* you must pour the swarm into, a green HP bar that ratchets as you crack
+it, sentinel add-waves, and a telegraphed *purge pulse* that scatters anyone parked on it.
 
 ## How it works
 

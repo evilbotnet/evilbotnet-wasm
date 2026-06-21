@@ -73,6 +73,19 @@ const NT_NORMAL: u8 = 0;
 const NT_SPAWNER: u8 = 1; // owned: spawns far more bots — a prize node
 const NT_SHIELD: u8 = 2; // infection crawls unless you SURGE on it
 const NT_HONEY: u8 = 3; // capturing it spawns sentinels — punishes greed
+const NT_BOSS: u8 = 4; // the EDR Core
+
+// boss
+const BOSS_R: f32 = 50; // infection reach
+const BOSS_DRAW_R: f32 = 34;
+const BOSS_GAP_COS: f32 = 0.50; // cos of gap half-angle (~120-deg arc); bots inside count
+const BOSS_INF_CAP: f32 = 38; // bots-in-gap for full infection rate
+const BOSS_INF_GAIN: f32 = 0.38; // HP fill rate (HP ratchets — never decays)
+const BOSS_SPIN_BASE: f32 = 0.60; // gap rotation (rad/s), scales with HP
+const BOSS_ADD_DT: f32 = 4.2; // seconds between sentinel adds
+const BOSS_PURGE_DT: f32 = 8.0; // seconds between purge pulses
+const BOSS_PURGE_R: f32 = 78;
+const BOSS_CHARGE_T: f32 = 1.1; // purge telegraph duration
 
 const SURGE_DUR: f32 = 1.2;
 const SURGE_CD: f32 = 4.0;
@@ -105,6 +118,15 @@ var cfg_shield: usize = 0;
 var cfg_spawner: usize = 0;
 var cfg_honey: usize = 0;
 var cfg_firewall: bool = false;
+var cfg_boss: bool = false;
+
+// boss runtime state
+var boss_active: bool = false;
+var boss_gx: f32 = 0; // gap direction (unit vector) — rotates, no trig needed
+var boss_gy: f32 = -1;
+var boss_add_t: f32 = 0;
+var boss_purge_t: f32 = 0;
+var boss_charge: f32 = 0; // 0..1 purge telegraph
 
 const COLLAPSE_N: usize = 8; // held below this many bots...
 const COLLAPSE_T: f32 = 4.0; // ...for this long = botnet dismantled (loss)
@@ -545,6 +567,12 @@ fn placeNodes() void {
     assignType(NT_SPAWNER, cfg_spawner);
     assignType(NT_SHIELD, cfg_shield);
     assignType(NT_HONEY, cfg_honey);
+
+    if (cfg_boss and node_count >= 2) {
+        node_x[1] = W / 2;
+        node_y[1] = @as(f32, @floatFromInt(H)) * 0.36;
+        node_type[1] = NT_BOSS;
+    }
 }
 
 fn assignType(t: u8, count: usize) void {
@@ -684,6 +712,14 @@ export fn init(seed: u32) void {
     fw_on = true;
     fw_t = FW_ON_DUR;
     fw_emp_t = 0;
+
+    // boss
+    boss_active = cfg_boss;
+    boss_gx = 0;
+    boss_gy = -1;
+    boss_add_t = BOSS_ADD_DT;
+    boss_purge_t = BOSS_PURGE_DT;
+    boss_charge = 0;
 
     var i: usize = 0;
     while (i < cfg_start_bots) : (i += 1) {
@@ -849,10 +885,26 @@ fn stepBots(dt: f32) void {
 fn stepNodes(dt: f32) void {
     var i: usize = 0;
     while (i < node_count) : (i += 1) {
+        const is_boss = boss_active and i == 1;
         var near: f32 = 0;
-        var b: usize = 0;
-        while (b < bot_count) : (b += 1) {
-            if (dist2(bot_x[b], bot_y[b], node_x[i], node_y[i]) < NODE_INF_R * NODE_INF_R) near += 1;
+        if (is_boss) {
+            // only bots inside the rotating shield gap count toward HP
+            var b: usize = 0;
+            while (b < bot_count) : (b += 1) {
+                const ddx = bot_x[b] - node_x[i];
+                const ddy = bot_y[b] - node_y[i];
+                const d2 = ddx * ddx + ddy * ddy;
+                if (d2 < BOSS_R * BOSS_R and d2 > 1) {
+                    const inv = 1.0 / @sqrt(d2);
+                    const dot = (ddx * inv) * boss_gx + (ddy * inv) * boss_gy;
+                    if (dot >= BOSS_GAP_COS) near += 1;
+                }
+            }
+        } else {
+            var b: usize = 0;
+            while (b < bot_count) : (b += 1) {
+                if (dist2(bot_x[b], bot_y[b], node_x[i], node_y[i]) < NODE_INF_R * NODE_INF_R) near += 1;
+            }
         }
         var sentHere = false;
         var s: usize = 0;
@@ -865,20 +917,26 @@ fn stepNodes(dt: f32) void {
 
         const prev_owned = node_owned[i];
         if (near > 0) {
-            const k = clampf(near / INF_CAP, 0, 1);
-            var gain = k * INF_GAIN * cfg_infect;
-            if (node_type[i] == NT_SHIELD) gain *= if (surge_t > 0) 1.5 else 0.28; // SURGE to crack the shield
-            node_inf[i] += gain * dt;
-        } else {
-            node_inf[i] -= INF_DECAY * dt;
+            if (is_boss) {
+                const k = clampf(near / BOSS_INF_CAP, 0, 1);
+                node_inf[i] += k * BOSS_INF_GAIN * dt;
+            } else {
+                const k = clampf(near / INF_CAP, 0, 1);
+                var gain = k * INF_GAIN * cfg_infect;
+                if (node_type[i] == NT_SHIELD) gain *= if (surge_t > 0) 1.5 else 0.28; // SURGE to crack the shield
+                node_inf[i] += gain * dt;
+            }
+        } else if (!is_boss) {
+            node_inf[i] -= INF_DECAY * dt; // boss HP ratchets — never decays
         }
-        if (sentHere and near < INF_CAP * 0.5) node_inf[i] -= INF_DISINFECT * dt;
+        if (!is_boss and sentHere and near < INF_CAP * 0.5) node_inf[i] -= INF_DISINFECT * dt;
         node_inf[i] = clampf(node_inf[i], 0, 1);
 
-        // hysteresis: capture at full, only lose ownership once well scrubbed
+        // hysteresis: capture at full, only lose ownership once well scrubbed.
+        // The home node (0) is your base — it can never be lost.
         if (!node_owned[i] and node_inf[i] >= 0.999) {
             node_owned[i] = true;
-        } else if (node_owned[i] and node_inf[i] < OWN_LOSE_AT) {
+        } else if (node_owned[i] and i != 0 and node_inf[i] < OWN_LOSE_AT) {
             node_owned[i] = false;
         }
         if (node_pulse[i] > 0) node_pulse[i] -= dt;
@@ -1026,6 +1084,58 @@ fn stepSentinels(dt: f32) void {
     }
 }
 
+fn stepBoss(dt: f32) void {
+    const ci: usize = 1;
+    if (node_count < 2) return;
+    const inf = node_inf[ci];
+
+    // rotate the shield gap (first-order rotation + renormalize — no trig)
+    const omega = BOSS_SPIN_BASE * (1.0 + inf * 0.7);
+    const nx = boss_gx - omega * dt * boss_gy;
+    const ny = boss_gy + omega * dt * boss_gx;
+    const inv = 1.0 / @sqrt(nx * nx + ny * ny);
+    boss_gx = nx * inv;
+    boss_gy = ny * inv;
+
+    if (node_owned[ci]) return; // cracked — stop fighting back
+
+    // sentinel adds
+    boss_add_t -= dt;
+    if (boss_add_t <= 0) {
+        boss_add_t = BOSS_ADD_DT * (1.0 - inf * 0.4);
+        spawnSentinelAt(node_x[ci] + rndRange(-20, 20), node_y[ci] + rndRange(-20, 20));
+        if (inf > 0.5) spawnSentinelAt(node_x[ci] + rndRange(-20, 20), node_y[ci] + rndRange(-20, 20));
+    }
+
+    // purge pulse: telegraph then radial shockwave that scatters/kills nearby bots
+    boss_purge_t -= dt;
+    boss_charge = if (boss_purge_t <= BOSS_CHARGE_T) clampf((BOSS_CHARGE_T - boss_purge_t) / BOSS_CHARGE_T, 0, 1) else 0;
+    if (boss_purge_t <= 0) {
+        var bi: usize = 0;
+        while (bi < bot_count) {
+            const d2 = dist2(bot_x[bi], bot_y[bi], node_x[ci], node_y[ci]);
+            if (d2 < BOSS_PURGE_R * BOSS_PURGE_R) {
+                if ((rnd() % 100) < 22) {
+                    burst(bot_x[bi], bot_y[bi], 3, 130, COL_SENT);
+                    killBot(bi);
+                    continue;
+                } else {
+                    // shove survivors outward (scatter, don't wipe)
+                    const dd = @sqrt(@max(d2, 1));
+                    const pinv = 1.0 / dd;
+                    bot_vx[bi] += (bot_x[bi] - node_x[ci]) * pinv * 420;
+                    bot_vy[bi] += (bot_y[bi] - node_y[ci]) * pinv * 420;
+                    bi += 1;
+                }
+            } else bi += 1;
+        }
+        burst(node_x[ci], node_y[ci], 44, 230, COL_SENT);
+        addShake(16);
+        boss_purge_t = BOSS_PURGE_DT;
+        boss_charge = 0;
+    }
+}
+
 fn stepParticles(dt: f32) void {
     var i: usize = 0;
     while (i < part_count) {
@@ -1107,6 +1217,7 @@ export fn update(dt_in: f32) void {
         stepBots(dt);
         stepNodes(dt);
         stepSentinels(dt);
+        if (boss_active) stepBoss(dt);
         if (bot_count < COLLAPSE_N) {
             collapse_t += dt;
         } else {
@@ -1168,6 +1279,49 @@ fn glow(cx: f32, cy: f32, r: f32, cr: u32, cg: u32, cb: u32, intensity: f32) voi
                 addPx(x, y, @intFromFloat(fcr * k), @intFromFloat(fcg * k), @intFromFloat(fcb * k));
             }
         }
+    }
+}
+
+fn drawBoss(cx: f32, cy: f32, inf: f32, owned: bool) void {
+    const R = BOSS_DRAW_R;
+    const pb = 0.6 + 0.4 * pulse(anim_t * 2.2);
+    const shield = if (owned) COL_OWNED else COL_SENT;
+
+    // concentric shield rings
+    circleOutline(cx, cy, R + 4, scaleColor(shield, pb));
+    circleOutline(cx, cy, R, scaleColor(shield, 0.7));
+    circleOutline(cx, cy, R - 5, scaleColor(shield, 0.4));
+
+    // 8 rotating spokes from the gap vector; skip k==0 to leave the opening visible
+    var dx = boss_gx;
+    var dy = boss_gy;
+    const inR = R - 4;
+    const outR = R + 9;
+    var k: usize = 0;
+    while (k < 8) : (k += 1) {
+        if (k != 0) drawLine(cx + dx * inR, cy + dy * inR, cx + dx * outR, cy + dy * outR, scaleColor(shield, 0.8));
+        const rx = dx * 0.70710678 - dy * 0.70710678;
+        const ry = dx * 0.70710678 + dy * 0.70710678;
+        dx = rx;
+        dy = ry;
+    }
+
+    // bright gap marker — where to pour the swarm
+    const gmx = cx + boss_gx * R;
+    const gmy = cy + boss_gy * R;
+    fillCircle(gmx, gmy, 4, COL_SPAWN);
+    fillCircle(gmx, gmy, 2, rgb(220, 255, 255));
+
+    // green HP core grows from the centre as you crack it
+    const cr = 4 + inf * (R - 9);
+    fillCircle(cx, cy, cr, scaleColor(COL_OWNED, 0.85));
+    fillCircle(cx, cy, 4 + inf * 5, rgb(200, 255, 220));
+
+    // purge telegraph: expanding red ring
+    if (boss_charge > 0) {
+        const pr = 10 + boss_charge * BOSS_PURGE_R;
+        circleOutline(cx, cy, pr, scaleColor(COL_SENT, 0.4 + 0.6 * boss_charge));
+        circleOutline(cx, cy, pr - 1, scaleColor(COL_SENT, 0.3 * boss_charge));
     }
 }
 
@@ -1233,6 +1387,10 @@ fn render() void {
 
     var i: usize = 0;
     while (i < node_count) : (i += 1) {
+        if (boss_active and i == 1) {
+            drawBoss(node_x[i], node_y[i], node_inf[i], node_owned[i]);
+            continue;
+        }
         const inf = node_inf[i];
         var ring = COL_CLEAN;
         if (node_owned[i]) {
@@ -1491,6 +1649,22 @@ export fn setSpecials(shield: i32, spawner: i32, honey: i32) void {
 }
 export fn setFirewall(on: i32) void {
     cfg_firewall = on != 0;
+}
+export fn setBoss(on: i32) void {
+    cfg_boss = on != 0;
+}
+export fn getBoss() i32 {
+    return if (boss_active) 1 else 0;
+}
+export fn getBossHP() i32 {
+    if (!boss_active or node_count < 2) return 0;
+    return @intFromFloat(node_inf[1] * 100);
+}
+export fn getBossGapX() f32 {
+    return boss_gx;
+}
+export fn getBossGapY() f32 {
+    return boss_gy;
 }
 export fn getFirewall() i32 {
     if (!fw_active) return 0; // none
